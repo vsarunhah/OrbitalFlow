@@ -1,0 +1,13 @@
+---
+description: Test each step and provide validation instructions
+alwaysApply: true
+---
+
+# Test and Validate Workflow
+
+For every step you work on:
+
+1. **Test it yourself** – Run the code, commands, or flow to verify it works before moving on.
+2. **Provide validation steps** – Clearly explain how the user can verify it works (commands to run, what to check, expected results).
+
+Do not skip testing. Do not assume something works without running it. Tell the user exactly how to validate each step.

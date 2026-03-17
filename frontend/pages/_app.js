@@ -10,6 +10,7 @@ import { theme } from "../theme";
 import { AuthProvider } from "../lib/auth";
 import NavBar from "../components/NavBar";
 import { useRouter } from "next/router";
+import { Analytics } from "@vercel/analytics/next";
 
 const clientSideCache = createEmotionCache();
 
@@ -61,6 +62,7 @@ export default function App(props) {
           <AppContent Component={Component} pageProps={pageProps} />
         </AuthProvider>
       </ThemeProvider>
+      <Analytics />
     </CacheProvider>
   );
 }

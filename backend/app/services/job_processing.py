@@ -326,6 +326,10 @@ def _create_contacts_for_job(
         message.from_address or ""
     )
 
+    # Track (job_id, contact_id) we've already linked this batch to avoid
+    # duplicate JobContact when the same contact appears twice with different roles.
+    seen_job_contact: set[tuple[uuid.UUID, uuid.UUID]] = set()
+
     for entry in contacts_data:
         raw_email = (entry.get("email") or "").strip()
         _, email = _parse_email_address(raw_email) if raw_email else (None, "")
@@ -363,7 +367,10 @@ def _create_contacts_for_job(
                 affiliation_type=aff_type,
             )
 
-        _upsert_job_contact(db, tenant_id, job, contact, contact_role)
+        key = (job.id, contact.id)
+        if key not in seen_job_contact:
+            seen_job_contact.add(key)
+            _upsert_job_contact(db, tenant_id, job, contact, contact_role)
 
     db.flush()
 

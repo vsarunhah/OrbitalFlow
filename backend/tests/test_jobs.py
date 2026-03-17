@@ -329,3 +329,77 @@ class TestManualOverride:
         r = client.get("/jobs", headers=auth_header)
         assert r.json()["total"] == 1
         assert r.json()["items"][0]["id"] == str(target_id)
+
+
+class TestJobContactDeduplication:
+    """Regression: same contact in extraction twice (e.g. different roles) must not duplicate job_contacts."""
+
+    def test_duplicate_contact_in_extraction_creates_single_job_contact(
+        self, client, auth_header, db_session
+    ):
+        import json
+        from app.models.contact import JobContact
+        from app.models.email_account import EmailAccount
+        from app.models.job import Job
+        from app.models.message import Message
+        from app.models.message_extraction import MessageExtraction
+        from app.services.job_processing import _create_contacts_for_job
+
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+
+        account = EmailAccount(
+            tenant_id=tenant_id,
+            email_address="me@test.com",
+            provider="gmail",
+            oauth_encrypted="dummy",
+        )
+        db_session.add(account)
+        db_session.flush()
+
+        job = Job(
+            tenant_id=tenant_id,
+            company="Acme",
+            role="SWE",
+            current_stage="SOURCED",
+        )
+        db_session.add(job)
+        db_session.flush()
+
+        msg = Message(
+            tenant_id=tenant_id,
+            account_id=account.id,
+            provider_msg_id="msg-dup",
+            raw_payload_json="{}",
+            from_address="Recruiter <recruiter@acme.com>",
+        )
+        db_session.add(msg)
+        db_session.flush()
+
+        # Same contact twice with different roles (triggers UniqueViolation without fix)
+        extraction = MessageExtraction(
+            tenant_id=tenant_id,
+            message_id=msg.id,
+            status="completed",
+            category="RECRUITER",
+            event_type="FOLLOW_UP",
+            company="Acme",
+            role="SWE",
+            contacts_json=json.dumps([
+                {"email": "recruiter@acme.com", "name": "Jane", "role": "Recruiter"},
+                {"email": "recruiter@acme.com", "name": "Jane", "role": "Engineering Manager"},
+            ]),
+            confidence=0.9,
+            rationale="Test",
+        )
+        db_session.add(extraction)
+        db_session.flush()
+
+        _create_contacts_for_job(db_session, tenant_id, job, msg, extraction)
+        db_session.commit()
+
+        count = db_session.query(JobContact).filter(
+            JobContact.tenant_id == tenant_id,
+            JobContact.job_id == job.id,
+        ).count()
+        assert count == 1, "Same contact with two roles must produce exactly one JobContact"

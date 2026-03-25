@@ -309,6 +309,113 @@ class TestDraftSend:
         assert second_send.status_code == 400
         assert "already sent" in second_send.json()["detail"].lower()
 
+    @patch("app.routers.drafts.generate_reply_variants")
+    def test_get_draft_recipients_reply_all(self, mock_generate, client, auth_header, db_session):
+        mock_generate.return_value = _three_variants()
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+        user_id = uuid.UUID(r.json()["user_id"])
+
+        job, account, _, msg = _create_job_with_account_and_llm(db_session, tenant_id, user_id)
+        _create_contact_for_job(db_session, tenant_id, job.id)
+        db_session.commit()
+
+        create_resp = client.post(
+            f"/jobs/{job.id}/draft-reply",
+            headers=auth_header,
+            json={"source_message_id": str(msg.id)},
+        )
+        draft_id = create_resp.json()["draft"]["id"]
+
+        rec_resp = client.get(f"/drafts/{draft_id}/recipients", headers=auth_header)
+        assert rec_resp.status_code == 200
+        data = rec_resp.json()
+        assert "to_addrs" in data
+        assert "cc_addrs" in data
+        assert data["to_addrs"] == ["recruiter@acme.com"]
+        assert data["cc_addrs"] == []  # sender me@example.com excluded from CC
+
+    @patch("app.routers.drafts.GmailProvider")
+    @patch("app.routers.drafts.generate_reply_variants")
+    def test_send_draft_with_recipient_override(self, mock_generate, mock_gmail_cls, client, auth_header, db_session):
+        mock_generate.return_value = _three_variants()
+        mock_gmail_cls.return_value.send_message.return_value = SendResult(
+            provider_message_id="override-1", thread_id="thread-123",
+        )
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+        user_id = uuid.UUID(r.json()["user_id"])
+
+        job, account, _, msg = _create_job_with_account_and_llm(db_session, tenant_id, user_id)
+        _create_contact_for_job(db_session, tenant_id, job.id)
+        db_session.commit()
+
+        create_resp = client.post(
+            f"/jobs/{job.id}/draft-reply",
+            headers=auth_header,
+            json={"source_message_id": str(msg.id)},
+        )
+        draft_id = create_resp.json()["draft"]["id"]
+
+        send_resp = client.post(
+            f"/drafts/{draft_id}/send",
+            headers=auth_header,
+            json={"to_addrs": ["only-this@example.com"], "cc_addrs": []},
+        )
+        assert send_resp.status_code == 200
+        mock_gmail_cls.return_value.send_message.assert_called_once()
+        call_kw = mock_gmail_cls.return_value.send_message.call_args[1]
+        assert call_kw["to_addrs"] == ["only-this@example.com"]
+        assert call_kw.get("cc_addrs") in (None, [])
+
+    def test_get_job_reply_recipients_without_draft(self, client, auth_header, db_session):
+        """GET /jobs/{id}/reply-recipients returns default reply-all before any draft exists."""
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+        user_id = uuid.UUID(r.json()["user_id"])
+
+        job, account, _, msg = _create_job_with_account_and_llm(db_session, tenant_id, user_id)
+        _create_contact_for_job(db_session, tenant_id, job.id)
+        db_session.commit()
+
+        rec_resp = client.get(
+            f"/jobs/{job.id}/reply-recipients",
+            headers=auth_header,
+            params={"source_message_id": str(msg.id)},
+        )
+        assert rec_resp.status_code == 200
+        data = rec_resp.json()
+        assert data["to_addrs"] == ["recruiter@acme.com"]
+        assert data["cc_addrs"] == []
+
+    def test_create_compose_draft(self, client, auth_header, db_session):
+        """POST /jobs/{id}/compose-draft creates a draft without AI."""
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+        user_id = uuid.UUID(r.json()["user_id"])
+
+        job, account, _, msg = _create_job_with_account_and_llm(db_session, tenant_id, user_id)
+        _create_contact_for_job(db_session, tenant_id, job.id)
+        db_session.commit()
+
+        resp = client.post(
+            f"/jobs/{job.id}/compose-draft",
+            headers=auth_header,
+            json={
+                "source_message_id": str(msg.id),
+                "subject": "Re: Quick question",
+                "body_text": "Thanks, I will reply soon.",
+            },
+        )
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["subject"] == "Re: Quick question"
+        assert d["body_text"] == "Thanks, I will reply soon."
+        assert d["job_id"] == str(job.id)
+        assert d["source_message_id"] == str(msg.id)
+        assert d["draft_type"] == "reply"
+        assert d["status"] == "EDITED"
+
 
 class TestResolveRecipientsReplyTo:
     """When replying in thread, prefer Reply-To header over From."""
@@ -367,10 +474,12 @@ class TestResolveRecipientsReplyTo:
         db_session.add(draft)
         db_session.flush()
 
-        to_addrs, cc_addrs, thread_id = _resolve_recipients_and_thread(db_session, tenant.id, draft)
+        to_addrs, cc_addrs, thread_id = _resolve_recipients_and_thread(
+            db_session, tenant.id, draft, sender_email=account.email_address
+        )
         assert thread_id == "thread-1"
         assert to_addrs == ["recruiter@company.com"]
-        assert cc_addrs == []
+        assert cc_addrs == []  # reply-all excludes sender (me@example.com)
 
     def test_falls_back_to_from_when_no_reply_to(self, db_session):
         from app.models.tenant import Tenant
@@ -425,8 +534,11 @@ class TestResolveRecipientsReplyTo:
         db_session.add(draft)
         db_session.flush()
 
-        to_addrs, _, _ = _resolve_recipients_and_thread(db_session, tenant.id, draft)
+        to_addrs, cc_addrs, _ = _resolve_recipients_and_thread(
+            db_session, tenant.id, draft, sender_email=account.email_address
+        )
         assert to_addrs == ["jane@acme.com"]
+        assert cc_addrs == []  # reply-all excludes sender (me@example.com)
 
 
 class TestReplyGenerationService:

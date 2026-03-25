@@ -262,8 +262,37 @@ export function updateDraft(draftId, { subject, body_text }) {
   });
 }
 
-export function sendDraft(draftId) {
-  return request(`/drafts/${draftId}/send`, { method: "POST" });
+export function getDraftRecipients(draftId) {
+  return request(`/drafts/${draftId}/recipients`);
+}
+
+/** Default reply-all To/CC for a job (optional source message). Use when opening Reply before a draft exists. */
+export function getJobReplyRecipients(jobId, sourceMessageId = null) {
+  const params = sourceMessageId ? { source_message_id: sourceMessageId } : {};
+  return request(`/jobs/${jobId}/reply-recipients`, { params });
+}
+
+/** Create a draft without AI (user subject/body). Use when sending without Suggest Reply. */
+export function createComposeDraft(jobId, { sourceMessageId, subject, body_text } = {}) {
+  return request(`/jobs/${jobId}/compose-draft`, {
+    method: "POST",
+    body: {
+      source_message_id: sourceMessageId || undefined,
+      subject: subject ?? undefined,
+      body_text: body_text ?? undefined,
+    },
+  });
+}
+
+export function sendDraft(draftId, { to_addrs, cc_addrs } = {}) {
+  const body =
+    to_addrs != null
+      ? { to_addrs: to_addrs || [], cc_addrs: cc_addrs || [] }
+      : undefined;
+  return request(`/drafts/${draftId}/send`, {
+    method: "POST",
+    body,
+  });
 }
 
 /** Generate follow-up email suggestion for a stalled job; creates a draft and returns it. */

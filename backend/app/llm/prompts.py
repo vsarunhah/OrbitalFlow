@@ -30,8 +30,9 @@ Rules:
 - "STATUS" = emails about an active application (confirmations, interviews, offers, rejections).
 - "RECRUITER" = cold outreach or follow-ups from recruiters not tied to a known application. Do NOT use RECRUITER for generic message notifications (e.g. "X just messaged you", "You have 1 new message") from LinkedIn or similar platforms (e.g. From: messaging-digest-noreply@linkedin.com). Those are only "you have a new message" alerts with no job or recruiter content—use category "OTHER" and event_type "NONE".
 - "ALERT" = only job-alert digests from job boards (e.g. LinkedIn Jobs, Indeed) that contain one or more concrete job listings (company, role, and/or job URL). For ALERT emails, populate the "jobs" array with each individual job listing found (company, role, location, url). For URLs, use only the clean base URL (e.g. "https://www.linkedin.com/jobs/view/12345") — strip tracking parameters. Do NOT use ALERT for: (1) shopping catalogues, marketing, or promotional emails; (2) LinkedIn or other digests that are not job-alert digests (e.g. news digests, network activity like "your network posted", "people you may know", weekly digests with no job listings). If the email is a digest but has no job listings, use category "OTHER" and event_type "NONE" with lower confidence.
+- IMPORTANT — "You are Invited!" / "You're invited" from job boards: Many job boards send emails with subjects like "You are Invited! Senior Software Engineer - 03/17/2026" or "You're invited to apply". These are NOT interview invites; they are notifications that you are invited to view or apply to a job listing. Classify these as category "ALERT" and event_type "JOB_ALERT". Use INTERVIEW_REQUEST or INTERVIEW_SCHEDULED ONLY when a human (recruiter, hiring manager) is inviting the candidate to an actual interview (phone call, video call, or in-person meeting). Check the From address: if it is from a job board (e.g. @linkedin.com, @indeed.com, job-alert domains) and the subject suggests "invited" to a job/role, treat as ALERT.
 - "OTHER" = unrelated to job search (including shopping, marketing, and non-job digests as above).
-- INTERVIEW_REQUEST = someone is proposing or asking to schedule an interview, but no confirmed date/time yet (e.g. "happy to chat", "let's set up a call", "are you available?").
+- INTERVIEW_REQUEST = a human (recruiter/hiring manager) is proposing or asking to schedule an interview (call or meeting), but no confirmed date/time yet (e.g. "happy to chat", "let's set up a call", "are you available?"). Do NOT use for job-board "you are invited" emails that are just pointing you to a job listing.
 - INTERVIEW_SCHEDULED = a specific date and time has been confirmed for an interview (e.g. "your interview is on March 5 at 2pm", calendar invite with confirmed slot).
 - If unsure between INTERVIEW_REQUEST and INTERVIEW_SCHEDULED, prefer INTERVIEW_REQUEST.
 - If unsure, use category "OTHER" and event_type "NONE" with low confidence.
@@ -81,7 +82,7 @@ Safety rules:
 
 Rules:
 - Match the tone and register of the existing email thread when possible. If a "requested tone" is provided (e.g. professional, warm, concise, enthusiastic, direct), use it to guide your reply.
-- When replying to an existing thread, use a subject that matches the thread (typically "Re: <original subject>").
+- Do NOT change the email subject. The subject is preserved from the thread (e.g. "Re: <original subject>"); output the same subject or a placeholder—it will be replaced by the system.
 - Keep the body plain text, suitable for email. No HTML or markdown formatting.
 - Format the body like a real email: use newlines to separate paragraphs and structure. Put the greeting (e.g. "Hi [Name],") on its own line; separate paragraphs with a blank line; put the sign-off (e.g. "Best," or "Thanks,") on its own line with the sender name on the next line. Do not output one long run-on paragraph.
 - Set "tone" to the tone you used (e.g. professional, warm). Set "confidence" to how confident you are in the reply (0.0-1.0).
@@ -162,7 +163,7 @@ Safety rules:
 - Keep each reply appropriate to its tone: concise = short and direct; warm = friendly and personable; enthusiastic = positive and eager.
 
 Rules:
-- When replying to a thread, use a subject that matches the thread (e.g. "Re: <original subject>").
+- Do NOT change the email subject; it is preserved from the thread. Output a placeholder if required—the system will use the thread subject.
 - Format the body like a real email: use actual newlines (\\n in the JSON string) to separate paragraphs and structure. Put the greeting (e.g. "Hi [Name],") on its own line; separate paragraphs with a blank line; put the sign-off (e.g. "Best," or "Thanks,") on its own line with the sender name on the next line. Do not output one long run-on paragraph.
 - No markdown, no code fences, no explanation. Output only the JSON object.
 """

@@ -65,6 +65,25 @@ class DraftUpdate(BaseModel):
     body_text: str | None = None
 
 
+class DraftRecipientsResponse(BaseModel):
+    """Response for GET /drafts/{id}/recipients. Default reply-all To/CC; user may remove before send."""
+    to_addrs: list[str] = Field(default_factory=list, description="To addresses")
+    cc_addrs: list[str] = Field(default_factory=list, description="CC addresses")
+
+
+class SendDraftRequest(BaseModel):
+    """Optional request body for POST /drafts/{id}/send. If provided, use these recipients instead of default reply-all."""
+    to_addrs: list[str] | None = Field(None, description="Override To (e.g. after user removed some)")
+    cc_addrs: list[str] | None = Field(None, description="Override CC (e.g. after user removed some)")
+
+
+class ComposeDraftRequest(BaseModel):
+    """Request body for POST /jobs/{id}/compose-draft. Create a draft without AI (user types subject/body)."""
+    source_message_id: uuid.UUID | None = Field(None, description="Message being replied to (for reply-all defaults)")
+    subject: str | None = Field(None, max_length=2000)
+    body_text: str | None = Field(None, description="Plain text body")
+
+
 class MessageDraftSchema(BaseModel):
     """Draft as returned by API."""
     id: uuid.UUID

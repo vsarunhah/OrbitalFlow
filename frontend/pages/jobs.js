@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/router";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
@@ -32,7 +32,10 @@ import {
   deleteJob,
   mergeJobs,
   createDraftReply,
+  createComposeDraft,
   getDraftForJob,
+  getDraftRecipients,
+  getJobReplyRecipients,
   updateDraft,
   sendDraft,
   generateFollowUpSuggestion,
@@ -256,9 +259,18 @@ function MergeJobsModal({ jobs, selectedIds, onClose, onConfirm }) {
   );
 }
 
-function ReplyDraftModal({ open, onClose, jobId, draft, onDraftCreated, onSaved, onSent }) {
+function normalizeEmail(input) {
+  const s = (input || "").trim().toLowerCase();
+  return s.includes("@") ? s : null;
+}
+
+function ReplyDraftModal({ open, onClose, jobId, draft, sourceMessageId, onDraftCreated, onSaved, onSent }) {
   const [subject, setSubject] = useState("");
   const [bodyText, setBodyText] = useState("");
+  const [toAddrs, setToAddrs] = useState([]);
+  const [ccAddrs, setCcAddrs] = useState([]);
+  const [addToInput, setAddToInput] = useState("");
+  const [addCcInput, setAddCcInput] = useState("");
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
   const [suggesting, setSuggesting] = useState(false);
@@ -275,20 +287,42 @@ function ReplyDraftModal({ open, onClose, jobId, draft, onDraftCreated, onSaved,
       if (variants.length > 0 && !selectedVariantId) {
         setSelectedVariantId(variants[0].variant_id || "concise");
       }
+      getDraftRecipients(draft.id)
+        .then((r) => {
+          setToAddrs(r.to_addrs || []);
+          setCcAddrs(r.cc_addrs || []);
+        })
+        .catch(() => {
+          setToAddrs([]);
+          setCcAddrs([]);
+        });
     } else if (open && jobId) {
       setSubject("");
       setBodyText("");
+      setToAddrs([]);
+      setCcAddrs([]);
+      setAddToInput("");
+      setAddCcInput("");
       setError(null);
       setSelectedVariantId(null);
+      getJobReplyRecipients(jobId, sourceMessageId || undefined)
+        .then((r) => {
+          setToAddrs(r.to_addrs || []);
+          setCcAddrs(r.cc_addrs || []);
+        })
+        .catch(() => {
+          setToAddrs([]);
+          setCcAddrs([]);
+        });
     }
-  }, [open, jobId, draft?.id]);
+  }, [open, jobId, draft?.id, sourceMessageId]);
 
   const handleSuggestReply = async () => {
     if (!jobId) return;
     setSuggesting(true);
     setError(null);
     try {
-      const res = await createDraftReply(jobId);
+      const res = await createDraftReply(jobId, { sourceMessageId: sourceMessageId || undefined });
       const draftWithVariants = { ...res.draft, variants: res.variants || [] };
       onDraftCreated?.(draftWithVariants);
     } catch (err) {
@@ -301,9 +335,9 @@ function ReplyDraftModal({ open, onClose, jobId, draft, onDraftCreated, onSaved,
   const handleSelectVariant = (variant) => {
     if (!variant || !draft) return;
     setSelectedVariantId(variant.variant_id);
-    setSubject(variant.subject || "");
+    // Only update body when switching variants; never change subject (preserve thread subject or user edit).
     setBodyText(variant.body || "");
-    updateDraft(draft.id, { subject: variant.subject, body_text: variant.body }).catch(() => {});
+    updateDraft(draft.id, { body_text: variant.body }).catch(() => {});
   };
 
   const handleSave = async () => {
@@ -321,17 +355,44 @@ function ReplyDraftModal({ open, onClose, jobId, draft, onDraftCreated, onSaved,
   };
 
   const handleSend = async () => {
-    if (!draft || draft.status === "SENT") return;
+    if (!jobId || toAddrs.length === 0 || draft?.status === "SENT") return;
     setSending(true);
     setError(null);
     try {
-      await sendDraft(draft.id);
+      let draftId = draft?.id;
+      if (!draftId) {
+        const created = await createComposeDraft(jobId, {
+          sourceMessageId: sourceMessageId || undefined,
+          subject: subject.trim() || undefined,
+          body_text: bodyText.trim() || undefined,
+        });
+        draftId = created.id;
+      }
+      await sendDraft(draftId, { to_addrs: toAddrs, cc_addrs: ccAddrs });
       onSent?.();
       onClose();
     } catch (err) {
       setError(err.message);
     } finally {
       setSending(false);
+    }
+  };
+
+  const removeTo = (email) => setToAddrs((prev) => prev.filter((e) => e !== email));
+  const removeCc = (email) => setCcAddrs((prev) => prev.filter((e) => e !== email));
+
+  const addToEmail = () => {
+    const email = normalizeEmail(addToInput);
+    if (email && !toAddrs.includes(email)) {
+      setToAddrs((prev) => [...prev, email]);
+      setAddToInput("");
+    }
+  };
+  const addCcEmail = () => {
+    const email = normalizeEmail(addCcInput);
+    if (email && !ccAddrs.includes(email)) {
+      setCcAddrs((prev) => [...prev, email]);
+      setAddCcInput("");
     }
   };
 
@@ -357,6 +418,50 @@ function ReplyDraftModal({ open, onClose, jobId, draft, onDraftCreated, onSaved,
           maxRows={3}
           sx={{ mb: 2 }}
         />
+        <Box sx={{ mb: 2 }}>
+          <Box sx={{ mb: 1 }}>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+              To {draft ? "(remove or add people)" : "(reply-all; remove or add people)"}
+            </Typography>
+            <Box sx={{ display: "flex", gap: 0.5, flexWrap: "wrap", alignItems: "center", mb: 0.5 }}>
+              {toAddrs.map((email) => (
+                <Chip key={email} label={email} size="small" onDelete={() => removeTo(email)} />
+              ))}
+              <TextField
+                size="small"
+                placeholder="Add email"
+                value={addToInput}
+                onChange={(e) => setAddToInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addToEmail())}
+                sx={{ width: 160 }}
+              />
+              <Button size="small" onClick={addToEmail} disabled={!normalizeEmail(addToInput)}>
+                Add
+              </Button>
+            </Box>
+          </Box>
+          <Box>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+              CC
+            </Typography>
+            <Box sx={{ display: "flex", gap: 0.5, flexWrap: "wrap", alignItems: "center" }}>
+              {ccAddrs.map((email) => (
+                <Chip key={email} label={email} size="small" onDelete={() => removeCc(email)} />
+              ))}
+              <TextField
+                size="small"
+                placeholder="Add email"
+                value={addCcInput}
+                onChange={(e) => setAddCcInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addCcEmail())}
+                sx={{ width: 160 }}
+              />
+              <Button size="small" onClick={addCcEmail} disabled={!normalizeEmail(addCcInput)}>
+                Add
+              </Button>
+            </Box>
+          </Box>
+        </Box>
         <TextField
           fullWidth
           multiline
@@ -401,15 +506,17 @@ function ReplyDraftModal({ open, onClose, jobId, draft, onDraftCreated, onSaved,
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
         {draft && (
-          <>
-            <Button onClick={handleSave} disabled={saving || draft.status === "SENT"}>
-              {saving ? "Saving..." : "Save"}
-            </Button>
-            <Button variant="contained" onClick={handleSend} disabled={sending || draft.status === "SENT"}>
-              {sending ? "Sending..." : "Send"}
-            </Button>
-          </>
+          <Button onClick={handleSave} disabled={saving || draft.status === "SENT"}>
+            {saving ? "Saving..." : "Save"}
+          </Button>
         )}
+        <Button
+          variant="contained"
+          onClick={handleSend}
+          disabled={sending || (draft && draft.status === "SENT") || toAddrs.length === 0}
+        >
+          {sending ? "Sending..." : "Send"}
+        </Button>
       </DialogActions>
     </Dialog>
   );
@@ -433,6 +540,15 @@ function TimelineView({ timeline, onStageChange, onJobUpdate, onRequestDelete, o
     }
     setEditing(false);
   }, [timeline?.job?.id]);
+
+  const sourceMessageId = useMemo(() => {
+    const msgs = timeline?.messages;
+    if (!msgs?.length) return null;
+    const sorted = [...msgs].sort(
+      (a, b) => new Date(b.date_header || b.id) - new Date(a.date_header || a.id)
+    );
+    return sorted[0]?.id ?? null;
+  }, [timeline?.messages]);
 
   if (!timeline) {
     return (
@@ -803,6 +919,7 @@ function TimelineView({ timeline, onStageChange, onJobUpdate, onRequestDelete, o
         onClose={() => setDraftModalOpen(false)}
         jobId={job?.id ?? null}
         draft={currentDraft}
+        sourceMessageId={sourceMessageId}
         onDraftCreated={setCurrentDraft}
         onSaved={(updates) => setCurrentDraft((d) => (d && updates ? { ...d, ...updates } : d))}
         onSent={() => { onTimelineRefresh?.(); setCurrentDraft(null); }}

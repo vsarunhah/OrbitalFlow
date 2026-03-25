@@ -8,10 +8,14 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
 
+from app.encryption import encrypt
+from app.models.draft import MessageDraft, SentMessage
+from app.models.email_account import EmailAccount
 from app.schemas.extraction import EventType
 from app.schemas.job import CONFIDENCE_THRESHOLD, JobStage
 from app.services.stage_reducer import compute_new_stage
@@ -329,6 +333,83 @@ class TestManualOverride:
         r = client.get("/jobs", headers=auth_header)
         assert r.json()["total"] == 1
         assert r.json()["items"][0]["id"] == str(target_id)
+
+    def test_merge_jobs_repoints_drafts_and_sent_messages(
+        self, client, auth_header, db_session
+    ):
+        """Merge succeeds and message_drafts/sent_messages are re-pointed to target job."""
+        target_id, tenant_id = _create_job_in_db(
+            client, auth_header, db_session, company="Acme", role="SWE"
+        )
+        source_id, _ = _create_job_in_db(
+            client, auth_header, db_session, company="Acme", role="Software Engineer"
+        )
+
+        r = client.get("/auth/me", headers=auth_header)
+        user_id = uuid.UUID(r.json()["user_id"])
+
+        account = EmailAccount(
+            tenant_id=tenant_id,
+            email_address="me@test.com",
+            provider="gmail",
+            oauth_encrypted=encrypt(json.dumps({"access_token": "x", "refresh_token": "y"})),
+        )
+        db_session.add(account)
+        db_session.flush()
+
+        draft = MessageDraft(
+            tenant_id=tenant_id,
+            job_id=source_id,
+            account_id=account.id,
+            subject="Re: Role",
+            body_text="Interested",
+            status="GENERATED",
+            created_by_user_id=user_id,
+        )
+        db_session.add(draft)
+        sent = SentMessage(
+            tenant_id=tenant_id,
+            job_id=source_id,
+            account_id=account.id,
+            provider="gmail",
+            to_addrs_json='["recruiter@acme.com"]',
+            subject="Re: Follow up",
+            body_text="Thank you.",
+        )
+        db_session.add(sent)
+        db_session.commit()
+
+        merge_resp = client.post(
+            "/jobs/merge",
+            headers=auth_header,
+            json={
+                "target_job_id": str(target_id),
+                "source_job_ids": [str(source_id)],
+            },
+        )
+        assert merge_resp.status_code == 200
+        assert merge_resp.json()["status"] == "merged"
+
+        db_session.expire_all()
+        drafts_for_target = db_session.query(MessageDraft).filter(
+            MessageDraft.job_id == target_id
+        ).all()
+        drafts_for_source = db_session.query(MessageDraft).filter(
+            MessageDraft.job_id == source_id
+        ).all()
+        sent_for_target = db_session.query(SentMessage).filter(
+            SentMessage.job_id == target_id
+        ).all()
+        sent_for_source = db_session.query(SentMessage).filter(
+            SentMessage.job_id == source_id
+        ).all()
+
+        assert len(drafts_for_target) == 1
+        assert drafts_for_target[0].subject == "Re: Role"
+        assert len(drafts_for_source) == 0
+        assert len(sent_for_target) == 1
+        assert sent_for_target[0].subject == "Re: Follow up"
+        assert len(sent_for_source) == 0
 
 
 class TestJobContactDeduplication:

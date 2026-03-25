@@ -18,12 +18,15 @@ from app.models.message import Message
 from app.models.user import User
 from app.providers.gmail import GmailProvider, TokenRefreshError
 from app.schemas.draft import (
+    ComposeDraftRequest,
+    DraftRecipientsResponse,
     DraftReplyRequest,
     DraftReplyResponse,
     DraftReplyResult,
     DraftUpdate,
     MessageDraftSchema,
     ReplyVariantSchema,
+    SendDraftRequest,
 )
 from app.services.job_processing import _parse_email_address
 from app.services.reply_generation import generate_reply_variants
@@ -134,6 +137,9 @@ def create_draft_reply_for_job(
         if event_with_msg:
             original_subject = event_with_msg.subject
     reply_subject = _reply_subject_from_original(original_subject) if original_subject is not None else first.subject
+    # Never change the email subject when suggesting a reply: use the thread subject for all variants.
+    if original_subject is not None:
+        variants = [v.model_copy(update={"subject": reply_subject}) for v in variants]
     draft = MessageDraft(
         tenant_id=auth.tenant_id,
         job_id=job_id,
@@ -216,52 +222,89 @@ def _resolve_account_for_job(
     return None
 
 
-def _resolve_recipients_and_thread(
+def _parse_address_list(raw: str | None) -> list[str]:
+    """Parse a comma-separated To/CC header into a list of lowercase email addresses."""
+    if not raw or not raw.strip():
+        return []
+    from email.utils import getaddresses
+
+    pairs = getaddresses([raw])
+    return [addr.strip().lower() for _, addr in pairs if addr and addr.strip()]
+
+
+def _resolve_recipients_for_reply(
     db: Session,
     tenant_id: uuid.UUID,
-    draft: MessageDraft,
+    job_id: uuid.UUID,
+    source_message_id: uuid.UUID | None,
+    sender_email: str | None,
 ) -> tuple[list[str], list[str], str | None]:
-    """Return (to_addrs, cc_addrs, thread_id). Raises ValueError if no recipients."""
+    """Return (to_addrs, cc_addrs, thread_id) for a reply. Reply-all by default; excludes sender from CC.
+    Raises ValueError if no recipients. Used by both draft send and GET reply-recipients."""
     to_addrs: list[str] = []
     cc_addrs: list[str] = []
     thread_id: str | None = None
+    sender_lower = sender_email.strip().lower() if sender_email else None
 
-    if draft.source_message_id:
+    if source_message_id:
         msg = (
             db.query(Message)
             .filter(
-                Message.id == draft.source_message_id,
+                Message.id == source_message_id,
                 Message.tenant_id == tenant_id,
             )
             .first()
         )
         if msg:
             thread_id = msg.thread_id
-            # Prefer Reply-To header so replies go to the address the sender asked for
+            primary_email: str | None = None
             if msg.headers_json:
                 try:
                     headers = json.loads(msg.headers_json)
-                    reply_to_raw = headers.get("reply-to") if isinstance(headers, dict) else None
-                    if reply_to_raw and isinstance(reply_to_raw, str):
-                        _, reply_to_email = _parse_email_address(reply_to_raw.strip())
-                        if reply_to_email:
-                            to_addrs.append(reply_to_email)
+                    if isinstance(headers, dict):
+                        reply_to_raw = headers.get("reply-to")
+                        if reply_to_raw and isinstance(reply_to_raw, str):
+                            _, primary_email = _parse_email_address(reply_to_raw.strip())
                 except (json.JSONDecodeError, TypeError):
                     pass
-            # Fall back to From, then To
-            if not to_addrs and msg.from_address:
-                _, from_email = _parse_email_address(msg.from_address.strip())
-                if from_email:
-                    to_addrs.append(from_email)
-            if not to_addrs and msg.to_addresses:
-                to_addrs = [a.strip() for a in msg.to_addresses.split(",") if a.strip()]
-
-    # If we still don't have a thread, use the thread of the job's most recent email
-    if thread_id is None and draft.job_id:
+            if not primary_email and msg.from_address:
+                _, primary_email = _parse_email_address(msg.from_address.strip())
+            if primary_email:
+                to_addrs = [primary_email]
+            all_others: list[str] = []
+            if msg.to_addresses:
+                all_others.extend(_parse_address_list(msg.to_addresses))
+            if msg.headers_json:
+                try:
+                    headers = json.loads(msg.headers_json)
+                    if isinstance(headers, dict):
+                        cc_raw = headers.get("cc")
+                        if cc_raw and isinstance(cc_raw, str):
+                            all_others.extend(_parse_address_list(cc_raw))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            seen = {primary_email} if primary_email else set()
+            if sender_lower:
+                seen.add(sender_lower)
+            for addr in all_others:
+                if addr and addr not in seen:
+                    seen.add(addr)
+                    cc_addrs.append(addr)
+            if not to_addrs and all_others:
+                to_addrs = [all_others[0]]
+                cc_addrs = list(dict.fromkeys(all_others[1:]))
+                for i in range(len(cc_addrs) - 1, -1, -1):
+                    if cc_addrs[i] == sender_lower:
+                        cc_addrs.pop(i)
+            elif not to_addrs and msg.to_addresses:
+                to_addrs = [a for a in _parse_address_list(msg.to_addresses) if a != sender_lower][:1]
+                if to_addrs:
+                    cc_addrs = [a for a in _parse_address_list(msg.to_addresses) if a != sender_lower and a != to_addrs[0]]
+    if thread_id is None and job_id:
         thread_ids = [
             row[0]
             for row in db.query(JobThread.thread_id).filter(
-                JobThread.job_id == draft.job_id,
+                JobThread.job_id == job_id,
                 JobThread.tenant_id == tenant_id,
             ).all()
             if row[0]
@@ -269,7 +312,7 @@ def _resolve_recipients_and_thread(
         event_msg_ids = [
             row[0]
             for row in db.query(JobEvent.message_id).filter(
-                JobEvent.job_id == draft.job_id,
+                JobEvent.job_id == job_id,
                 JobEvent.tenant_id == tenant_id,
                 JobEvent.message_id.isnot(None),
             ).all()
@@ -292,24 +335,116 @@ def _resolve_recipients_and_thread(
             last_msg = q.order_by(Message.date_header.desc().nullslast()).first()
             if last_msg and last_msg.thread_id:
                 thread_id = last_msg.thread_id
-
-    if not to_addrs and draft.job_id:
+    if not to_addrs and job_id:
         from app.models.contact import Contact, JobContact
         contacts = (
             db.query(Contact.email)
             .join(JobContact, JobContact.contact_id == Contact.id)
             .filter(
-                JobContact.job_id == draft.job_id,
+                JobContact.job_id == job_id,
                 JobContact.tenant_id == tenant_id,
             )
             .all()
         )
         to_addrs = [c[0] for c in contacts if c[0] and c[0].strip()]
-
     if not to_addrs:
-        raise ValueError("No recipients could be determined for this draft. Add a contact to the job or reply to a message.")
-
+        raise ValueError("No recipients could be determined. Add a contact to the job or reply to a message.")
     return to_addrs, cc_addrs, thread_id
+
+
+def _resolve_recipients_and_thread(
+    db: Session,
+    tenant_id: uuid.UUID,
+    draft: MessageDraft,
+    sender_email: str | None = None,
+) -> tuple[list[str], list[str], str | None]:
+    """Return (to_addrs, cc_addrs, thread_id) for sending this draft. Delegates to _resolve_recipients_for_reply."""
+    return _resolve_recipients_for_reply(
+        db, tenant_id, draft.job_id, draft.source_message_id, sender_email
+    )
+
+
+def get_reply_recipients_for_job(
+    db: Session,
+    auth: AuthContext,
+    job_id: uuid.UUID,
+    source_message_id: uuid.UUID | None,
+) -> DraftRecipientsResponse:
+    """Return default reply-all To/CC for a job (with optional source message). Used when opening Reply before a draft exists."""
+    from fastapi import HTTPException, status
+
+    job = (
+        db.query(Job)
+        .filter(Job.id == job_id, Job.tenant_id == auth.tenant_id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
+    account = _resolve_account_for_job(db, auth.tenant_id, job_id)
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No email account available for this job. Connect Gmail for the account that has this thread.",
+        )
+    try:
+        to_addrs, cc_addrs, _ = _resolve_recipients_for_reply(
+            db, auth.tenant_id, job_id, source_message_id, sender_email=account.email_address
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    return DraftRecipientsResponse(to_addrs=to_addrs, cc_addrs=cc_addrs)
+
+
+def create_compose_draft(
+    db: Session,
+    auth: AuthContext,
+    job_id: uuid.UUID,
+    body: ComposeDraftRequest,
+) -> MessageDraft:
+    """Create a draft without AI (user-provided subject/body). Used when sending a reply without Suggest Reply."""
+    from fastapi import HTTPException, status
+
+    job = (
+        db.query(Job)
+        .filter(Job.id == job_id, Job.tenant_id == auth.tenant_id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found",
+        )
+    account = _resolve_account_for_job(db, auth.tenant_id, job_id)
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No email account available for this job. Connect Gmail for the account that has this thread.",
+        )
+    subject = (body.subject or "").strip() or None
+    body_text = (body.body_text or "").strip() or None
+    draft = MessageDraft(
+        tenant_id=auth.tenant_id,
+        job_id=job_id,
+        source_message_id=body.source_message_id,
+        account_id=account.id,
+        draft_type="reply",
+        subject=subject,
+        body_text=body_text,
+        tone="professional",
+        status="EDITED" if (subject or body_text) else "GENERATED",
+        generation_context_json=json.dumps({"source": "compose", "user_wrote": True}),
+        created_by_user_id=auth.user_id,
+    )
+    db.add(draft)
+    db.commit()
+    db.refresh(draft)
+    return draft
 
 
 def create_draft_from_followup(
@@ -430,13 +565,60 @@ def update_draft(
     return draft
 
 
-@router.post("/{draft_id}/send", response_model=MessageDraftSchema)
-def send_draft(
+@router.get("/{draft_id}/recipients", response_model=DraftRecipientsResponse)
+def get_draft_recipients(
     draft_id: uuid.UUID,
     auth: AuthContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Send the draft via Gmail. Human-in-the-loop: user must have reviewed. Creates sent_messages + REPLY_SENT event."""
+    """Return default reply-all To/CC for this draft. User can remove recipients in the UI before sending."""
+    draft = (
+        db.query(MessageDraft)
+        .filter(
+            MessageDraft.id == draft_id,
+            MessageDraft.tenant_id == auth.tenant_id,
+        )
+        .first()
+    )
+    if not draft:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Draft not found",
+        )
+    if draft.status == "SENT":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Draft already sent",
+        )
+    account = (
+        db.query(EmailAccount)
+        .filter(
+            EmailAccount.id == draft.account_id,
+            EmailAccount.tenant_id == auth.tenant_id,
+        )
+        .first()
+    )
+    sender_email = account.email_address if account else None
+    try:
+        to_addrs, cc_addrs, _ = _resolve_recipients_and_thread(
+            db, auth.tenant_id, draft, sender_email=sender_email
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    return DraftRecipientsResponse(to_addrs=to_addrs, cc_addrs=cc_addrs)
+
+
+@router.post("/{draft_id}/send", response_model=MessageDraftSchema)
+def send_draft(
+    draft_id: uuid.UUID,
+    body: SendDraftRequest | None = None,
+    auth: AuthContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send the draft via Gmail. Optional body: to_addrs/cc_addrs override default reply-all (e.g. after user removed some)."""
     draft = (
         db.query(MessageDraft)
         .filter(
@@ -456,16 +638,6 @@ def send_draft(
             detail="Draft already sent",
         )
 
-    try:
-        to_addrs, cc_addrs, thread_id = _resolve_recipients_and_thread(
-            db, auth.tenant_id, draft
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
-
     account = (
         db.query(EmailAccount)
         .filter(
@@ -478,6 +650,24 @@ def send_draft(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email account not found",
+        )
+
+    try:
+        to_addrs, cc_addrs, thread_id = _resolve_recipients_and_thread(
+            db, auth.tenant_id, draft, sender_email=account.email_address
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    if body and body.to_addrs is not None:
+        to_addrs = [a.strip() for a in body.to_addrs if a and a.strip()]
+        cc_addrs = [a.strip() for a in (body.cc_addrs or []) if a and a.strip()]
+    if not to_addrs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one To address is required.",
         )
 
     provider = GmailProvider(db_session=db)

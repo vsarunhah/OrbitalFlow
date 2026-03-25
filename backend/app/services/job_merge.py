@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models.contact import JobContact
+from app.models.draft import MessageDraft, SentMessage
 from app.models.job import Job, JobEvent, JobIdentity, JobStageHistory, JobThread
 
 
@@ -64,6 +65,16 @@ def merge_job_into_target(
     db.query(JobIdentity).filter(JobIdentity.job_id == source.id).update(
         {"job_id": target.id}, synchronize_session=False
     )
+
+    # Re-point message_drafts and sent_messages so source job can be deleted
+    db.query(MessageDraft).filter(MessageDraft.job_id == source.id).update(
+        {"job_id": target.id}, synchronize_session=False
+    )
+    db.query(SentMessage).filter(SentMessage.job_id == source.id).update(
+        {"job_id": target.id}, synchronize_session=False
+    )
+
+    db.flush()
 
     # Update target's last_activity to the latest of both
     if source.last_activity and (

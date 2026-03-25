@@ -768,6 +768,96 @@ class TestExtractionServiceMissingKey:
             db.close()
             Base.metadata.drop_all(bind=engine)
 
+    def test_job_board_invited_subject_override_interview_to_alert(self):
+        """'You are Invited! [Role] - [Date]' from job-board domains must be ALERT/JOB_ALERT, not interview."""
+        from tests.conftest import TestSession, engine
+        from app.database import Base
+        from app.llm.base import LlmResponse
+
+        Base.metadata.create_all(bind=engine)
+        db = TestSession()
+
+        try:
+            from app.models.tenant import Tenant
+            from app.models.email_account import EmailAccount
+            from app.models.message import Message
+            from app.models.llm_key import LlmKey
+            from app.services.extraction import run_extraction
+            from app.encryption import encrypt
+
+            tenant = Tenant(name="TestCo9")
+            db.add(tenant)
+            db.flush()
+
+            account = EmailAccount(
+                tenant_id=tenant.id,
+                email_address="user9@test.com",
+                provider="gmail",
+                oauth_encrypted="encrypted_data",
+                sync_cursor_json="{}",
+            )
+            db.add(account)
+            db.flush()
+
+            llm_key = LlmKey(
+                tenant_id=tenant.id,
+                provider="openai",
+                encrypted_key=encrypt("sk-fake-key"),
+            )
+            db.add(llm_key)
+            db.flush()
+
+            msg = Message(
+                tenant_id=tenant.id,
+                account_id=account.id,
+                provider_msg_id="msg_009",
+                subject="You are Invited! Senior Software Engineer - 03/17/2026",
+                body_text="Check out this job that matches your profile.",
+                from_address="job-alerts@linkedin.com",
+                raw_payload_json="{}",
+                extraction_status="pending",
+            )
+            db.add(msg)
+            db.flush()
+
+            # LLM incorrectly returns STATUS/INTERVIEW_REQUEST (misreads "Invited" as interview invite)
+            interview_json = json.dumps({
+                "category": "STATUS",
+                "event_type": "INTERVIEW_REQUEST",
+                "company": None,
+                "role": "Senior Software Engineer",
+                "req_id": None,
+                "contacts": [],
+                "confidence": 0.85,
+                "rationale": "Email invites the candidate to an interview.",
+                "jobs": [],
+            })
+            good_response = LlmResponse(
+                raw_text=interview_json,
+                prompt_tokens=100,
+                completion_tokens=60,
+                model="gpt-4o-mini",
+            )
+            mock_client = MagicMock()
+            mock_client.provider_name = "openai"
+            mock_client.chat_json.return_value = good_response
+
+            with patch("app.services.extraction.get_llm_client", return_value=mock_client):
+                extraction = run_extraction(db, msg.id, tenant.id)
+
+            assert extraction.status == "completed"
+            assert extraction.category == "ALERT"
+            assert extraction.event_type == "JOB_ALERT"
+            assert extraction.alert_jobs_json is not None
+            jobs = json.loads(extraction.alert_jobs_json)
+            assert len(jobs) == 1
+            assert jobs[0].get("role") == "Senior Software Engineer"
+            db.refresh(msg)
+            assert msg.category == "ALERT"
+        finally:
+            db.close()
+            Base.metadata.drop_all(bind=engine)
+
 
 # ---------------------------------------------------------------------------
 # build_user_content includes From when provided

@@ -22,7 +22,7 @@ from app.llm.prompts import EXTRACTION_SYSTEM_PROMPT, build_user_content
 from app.models.llm_key import LlmKey
 from app.models.message import Message
 from app.models.message_extraction import MessageExtraction
-from app.schemas.extraction import Category, EventType, ExtractionResult
+from app.schemas.extraction import AlertJobItem, Category, EventType, ExtractionResult
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,34 @@ def run_extraction(db: Session, message_id: uuid.UUID, tenant_id: uuid.UUID) -> 
             _from[:80],
         )
 
+    # Post-extraction safeguard: "You are Invited! [Role] - [Date]" from job boards = ALERT, not interview
+    _subject = (message.subject or "").strip()
+    _invited_subject = "you are invited" in _subject.lower() or "you're invited" in _subject.lower()
+    _job_board_domains = (
+        "linkedin.com",
+        "indeed.com",
+        "glassdoor.com",
+        "jobright.com",
+        "job-alert",
+    )
+    _from_job_board = any(d in _from for d in _job_board_domains)
+    if (
+        result.category == Category.STATUS
+        and result.event_type in (EventType.INTERVIEW_REQUEST, EventType.INTERVIEW_SCHEDULED)
+        and _invited_subject
+        and _from_job_board
+    ):
+        result.category = Category.ALERT
+        result.event_type = EventType.JOB_ALERT
+        if not result.jobs and _subject:
+            role = _parse_role_from_invited_subject(_subject)
+            if role:
+                result.jobs = [AlertJobItem(role=role)]
+        logger.info(
+            "Override STATUS/INTERVIEW_* -> ALERT/JOB_ALERT for message_id=%s (job-board invite subject)",
+            message_id,
+        )
+
     extraction.category = result.category.value
     extraction.event_type = result.event_type.value
     extraction.company = result.company
@@ -185,6 +213,24 @@ def run_extraction(db: Session, message_id: uuid.UUID, tenant_id: uuid.UUID) -> 
         result.confidence,
     )
     return extraction
+
+
+def _parse_role_from_invited_subject(subject: str) -> str | None:
+    """Extract role/title from subject like 'You are Invited! Senior Software Engineer - 03/17/2026'."""
+    import re
+    subject = subject.strip()
+    if not subject:
+        return None
+    # Match "You are Invited!" or "You're invited" (case-insensitive), then capture rest until " - " or end
+    m = re.search(
+        r"(?:you\s+are\s+invited!?|you're\s+invited)\s*[:\s]*([^-]+?)(?:\s*-\s*[\d/]+\s*)?$",
+        subject,
+        re.IGNORECASE,
+    )
+    if m:
+        role = m.group(1).strip()
+        return role if len(role) <= 255 else role[:255]
+    return None
 
 
 def _get_llm_key(db: Session, tenant_id: uuid.UUID) -> LlmKey | None:

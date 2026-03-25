@@ -39,6 +39,8 @@ from app.schemas.job import (
     TimelineSentMessage,
 )
 from app.schemas.draft import (
+    ComposeDraftRequest,
+    DraftRecipientsResponse,
     DraftReplyRequest,
     DraftReplyResponse,
     FollowUpSuggestionResponse,
@@ -230,6 +232,29 @@ def delete_job(
     db.delete(job)
     db.commit()
     return None
+
+
+@router.get("/{job_id}/reply-recipients", response_model=DraftRecipientsResponse)
+def get_reply_recipients(
+    job_id: uuid.UUID,
+    source_message_id: Optional[uuid.UUID] = Query(None, description="Message being replied to (for reply-all)"),
+    auth: AuthContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return default reply-all To/CC for this job. Use when opening Reply before a draft exists."""
+    return drafts_router.get_reply_recipients_for_job(db, auth, job_id, source_message_id)
+
+
+@router.post("/{job_id}/compose-draft", response_model=MessageDraftSchema)
+def create_compose_draft(
+    job_id: uuid.UUID,
+    body: ComposeDraftRequest,
+    auth: AuthContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a draft without AI (user types subject/body). Use when sending a reply without Suggest Reply."""
+    draft = drafts_router.create_compose_draft(db, auth, job_id, body)
+    return draft
 
 
 @router.post("/{job_id}/draft-reply", response_model=DraftReplyResponse)

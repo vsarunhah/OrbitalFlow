@@ -26,7 +26,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models.email_account import EmailAccount
 from app.models.message import Message
-from app.providers.gmail import GmailProvider
+from app.providers.gmail import GmailProvider, TokenRefreshError
 from app.providers.polling import PollingChangeSource
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,22 @@ def sync_account(account_id: str, lookback_days: int | None = None) -> dict:
                 after_epoch_override,
             )
 
-        result = change_source.get_changes(account, cursor, after_epoch_override=after_epoch_override)
+        try:
+            result = change_source.get_changes(
+                account, cursor, after_epoch_override=after_epoch_override
+            )
+        except TokenRefreshError as e:
+            logger.warning(
+                "sync_account skipped: invalid Gmail token account_id=%s: %s",
+                account_id,
+                e,
+            )
+            return {
+                "status": "token_error",
+                "detail": (
+                    "Gmail authentication failed. Reconnect the account in Settings."
+                ),
+            }
 
         logger.info(
             "sync_account account_id=%s found %d refs",

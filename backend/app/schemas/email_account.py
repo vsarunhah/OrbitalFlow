@@ -22,3 +22,13 @@ class EmailAccountOut(BaseModel):
 class EmailAccountDisconnected(BaseModel):
     id: uuid.UUID
     status: str
+
+
+class GmailTokenHealthAccount(BaseModel):
+    id: uuid.UUID
+    ok: bool
+    detail: str | None = None
+
+
+class GmailTokenHealthResponse(BaseModel):
+    accounts: list[GmailTokenHealthAccount]

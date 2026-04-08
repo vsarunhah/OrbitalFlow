@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
@@ -13,6 +13,7 @@ import InputLabel from "@mui/material/InputLabel";
 import {
   startGmailOAuth,
   listEmailAccounts,
+  checkGmailTokenHealth,
   disconnectEmailAccount,
   triggerSync,
   deleteAccountMessages,
@@ -57,12 +58,20 @@ function KeyIcon() {
   );
 }
 
-function AccountCard({ account, onRequestDisconnect }) {
+function AccountCard({
+  account,
+  onRequestDisconnect,
+  tokenHealth,
+  onReconnect,
+  oauthBusy,
+}) {
   const [syncing, setSyncing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [lookbackDays, setLookbackDays] = useState(7);
   const [syncResult, setSyncResult] = useState(null);
   const [showDeleteMessagesConfirm, setShowDeleteMessagesConfirm] = useState(false);
+  const tokenOk = tokenHealth?.ok !== false;
+  const tokenDetail = tokenHealth?.detail;
 
   async function handleForceSync() {
     setSyncing(true);
@@ -109,31 +118,47 @@ function AccountCard({ account, onRequestDisconnect }) {
           borderColor: "divider",
         }}
       >
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, flexWrap: "wrap" }}>
           <Box
             sx={{
               width: 8,
               height: 8,
               borderRadius: "50%",
-              bgcolor: "success.main",
+              bgcolor: tokenOk ? "success.main" : "error.main",
             }}
           />
           <Typography fontWeight={500} fontSize={14}>
             {account.email_address}
           </Typography>
-          <Typography variant="caption" color="success.main">
-            Connected
+          <Typography variant="caption" color={tokenOk ? "success.main" : "error.main"}>
+            {tokenOk ? "Connected" : "Reconnect required"}
           </Typography>
         </Box>
-        <Button
-          size="small"
-          color="error"
-          variant="outlined"
-          onClick={onRequestDisconnect}
-        >
-          Disconnect
-        </Button>
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center" }}>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={onReconnect}
+            disabled={oauthBusy || syncing || deleting}
+          >
+            {oauthBusy ? "Redirecting..." : "Reconnect"}
+          </Button>
+          <Button
+            size="small"
+            color="error"
+            variant="outlined"
+            onClick={onRequestDisconnect}
+            disabled={oauthBusy}
+          >
+            Disconnect
+          </Button>
+        </Box>
       </Box>
+      {!tokenOk && tokenDetail && (
+        <Box sx={{ px: 1.5, pb: 1 }}>
+          <Alert severity="error">{tokenDetail}</Alert>
+        </Box>
+      )}
       <Box sx={{ p: 1.5, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 1 }}>
         <FormControl size="small" sx={{ minWidth: 160 }}>
           <InputLabel>Sync period</InputLabel>
@@ -150,7 +175,7 @@ function AccountCard({ account, onRequestDisconnect }) {
         <Button
           variant="contained"
           size="small"
-          disabled={syncing || deleting}
+          disabled={syncing || deleting || !tokenOk}
           onClick={handleForceSync}
         >
           {syncing ? "Syncing..." : "Force Sync"}
@@ -189,35 +214,60 @@ function AccountCard({ account, onRequestDisconnect }) {
 function GmailSection() {
   const router = useRouter();
   const [accounts, setAccounts] = useState([]);
+  const [tokenHealthById, setTokenHealthById] = useState({});
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [disconnectConfirmAccount, setDisconnectConfirmAccount] = useState(null);
 
-  useEffect(() => {
-    if (router.query.gmail === "connected") {
-      setSuccess("Gmail account connected successfully!");
-      router.replace("/settings", undefined, { shallow: true });
-    }
-  }, [router.query.gmail]);
-
-  async function loadAccounts() {
+  const loadAccounts = useCallback(async () => {
     try {
       const data = await listEmailAccounts();
       setAccounts(data);
+      const gmailActive = data.filter((a) => a.status === "active" && a.provider === "gmail");
+      if (gmailActive.length > 0) {
+        try {
+          const h = await checkGmailTokenHealth();
+          const map = {};
+          for (const row of h.accounts) {
+            map[row.id] = { ok: row.ok, detail: row.detail };
+          }
+          setTokenHealthById(map);
+        } catch (healthErr) {
+          setError(healthErr.message);
+          const map = {};
+          for (const a of gmailActive) {
+            map[a.id] = {
+              ok: false,
+              detail:
+                "Could not verify Gmail connection. Try again or check your network.",
+            };
+          }
+          setTokenHealthById(map);
+        }
+      } else {
+        setTokenHealthById({});
+      }
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    if (router.query.gmail !== "connected") return;
+    setSuccess("Gmail authorization updated successfully.");
+    loadAccounts();
+    router.replace("/settings", undefined, { shallow: true });
+  }, [router.query.gmail, loadAccounts, router]);
 
   useEffect(() => {
     loadAccounts();
-  }, []);
+  }, [loadAccounts]);
 
-  async function handleConnect() {
+  async function startGmailOAuthFlow() {
     setConnecting(true);
     setError(null);
     try {
@@ -265,6 +315,9 @@ function GmailSection() {
             <AccountCard
               key={acc.id}
               account={acc}
+              tokenHealth={tokenHealthById[acc.id]}
+              onReconnect={startGmailOAuthFlow}
+              oauthBusy={connecting}
               onRequestDisconnect={() => setDisconnectConfirmAccount(acc)}
             />
           ))}
@@ -282,7 +335,7 @@ function GmailSection() {
             }}
             onCancel={() => setDisconnectConfirmAccount(null)}
           />
-          <Button variant="outlined" onClick={handleConnect} disabled={connecting} sx={{ mt: 1 }}>
+          <Button variant="outlined" onClick={startGmailOAuthFlow} disabled={connecting} sx={{ mt: 1 }}>
             {connecting ? "Redirecting..." : "Connect Another Account"}
           </Button>
         </Box>
@@ -290,7 +343,7 @@ function GmailSection() {
         <Button
           variant="contained"
           size="large"
-          onClick={handleConnect}
+          onClick={startGmailOAuthFlow}
           disabled={connecting}
         >
           {connecting ? "Redirecting to Google..." : "Connect Gmail Account"}

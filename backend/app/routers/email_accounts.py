@@ -17,8 +17,11 @@ from app.models.email_account import EmailAccount
 from app.schemas.email_account import (
     EmailAccountDisconnected,
     EmailAccountOut,
+    GmailTokenHealthAccount,
+    GmailTokenHealthResponse,
     OAuthStartResponse,
 )
+from app.providers.gmail import verify_gmail_connection
 
 router = APIRouter(prefix="/email-accounts", tags=["email-accounts"])
 logger = logging.getLogger(__name__)
@@ -163,6 +166,29 @@ def _get_google_user_info(access_token: str) -> dict:
     return {"email": email, "name": (data.get("name") or "").strip() or None}
 
 
+@router.get("/gmail-token-health", response_model=GmailTokenHealthResponse)
+def gmail_token_health(
+    auth: AuthContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> GmailTokenHealthResponse:
+    """Check whether each active Gmail account can refresh or use its OAuth token."""
+    accounts = (
+        db.query(EmailAccount)
+        .filter(
+            EmailAccount.tenant_id == auth.tenant_id,
+            EmailAccount.status == "active",
+            EmailAccount.provider == "gmail",
+        )
+        .order_by(EmailAccount.created_at)
+        .all()
+    )
+    out: list[GmailTokenHealthAccount] = []
+    for acc in accounts:
+        ok, detail = verify_gmail_connection(acc, db)
+        out.append(GmailTokenHealthAccount(id=acc.id, ok=ok, detail=detail))
+    return GmailTokenHealthResponse(accounts=out)
+
+
 @router.get("", response_model=list[EmailAccountOut])
 def list_email_accounts(
     auth: AuthContext = Depends(get_current_user),
@@ -295,6 +321,13 @@ def trigger_sync(
     )
     if not account:
         raise HTTPException(status_code=404, detail="Email account not found or inactive")
+
+    ok, token_err = verify_gmail_connection(account, db)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=token_err or "Gmail authentication failed. Reconnect in Settings.",
+        )
 
     from app.workers.connection import task_queue
     from app.workers.jobs import sync_account

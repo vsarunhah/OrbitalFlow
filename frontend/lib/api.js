@@ -186,6 +186,11 @@ export function listEmailAccounts() {
   return request("/email-accounts");
 }
 
+/** Returns { accounts: [{ id, ok, detail }] } for active Gmail connections. */
+export function checkGmailTokenHealth() {
+  return request("/email-accounts/gmail-token-health");
+}
+
 export function disconnectEmailAccount(accountId) {
   return request(`/email-accounts/${accountId}/disconnect`, { method: "POST" });
 }

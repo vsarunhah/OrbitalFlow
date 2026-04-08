@@ -185,6 +185,68 @@ def test_oauth_callback_reconnect_updates_existing(mock_exchange, mock_userinfo,
     assert accounts[0]["status"] == "active"
 
 
+# ── gmail token health tests ─────────────────────────────────────────────────
+
+def test_gmail_token_health_requires_auth(client):
+    r = client.get("/email-accounts/gmail-token-health")
+    assert r.status_code in (401, 403)
+
+
+@patch("app.routers.email_accounts.verify_gmail_connection", return_value=(True, None))
+def test_gmail_token_health_ok(mock_verify, client, auth_header):
+    r = client.get("/email-accounts/gmail-token-health", headers=auth_header)
+    assert r.status_code == 200
+    assert r.json() == {"accounts": []}
+
+
+@patch("app.routers.email_accounts.verify_gmail_connection", return_value=(False, "bad token"))
+@patch("app.routers.email_accounts._get_google_user_info", return_value={"email": "user@gmail.com", "name": None})
+@patch("app.routers.email_accounts._exchange_code_for_tokens", return_value={
+    "access_token": "ya29.fake", "refresh_token": "1//fake", "expires_in": 3600,
+})
+def test_gmail_token_health_reports_failure(
+    mock_exchange, mock_userinfo, mock_verify, client, auth_header,
+):
+    state = _make_state(auth_header, client)
+    client.get(
+        "/email-accounts/gmail/oauth-callback",
+        params={"code": "code", "state": state},
+        follow_redirects=False,
+    )
+
+    r = client.get("/email-accounts/gmail-token-health", headers=auth_header)
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["accounts"]) == 1
+    assert body["accounts"][0]["ok"] is False
+    assert body["accounts"][0]["detail"] == "bad token"
+
+
+@patch("app.routers.email_accounts.verify_gmail_connection", return_value=(True, None))
+@patch("app.routers.email_accounts._get_google_user_info", return_value={"email": "user@gmail.com", "name": None})
+@patch("app.routers.email_accounts._exchange_code_for_tokens", return_value={
+    "access_token": "ya29.fake", "refresh_token": "1//fake", "expires_in": 3600,
+})
+def test_trigger_sync_rejects_invalid_token(
+    mock_exchange, mock_userinfo, mock_verify, client, auth_header,
+):
+    """Sync is not enqueued when verify_gmail_connection fails."""
+    state = _make_state(auth_header, client)
+    client.get(
+        "/email-accounts/gmail/oauth-callback",
+        params={"code": "code", "state": state},
+        follow_redirects=False,
+    )
+
+    accounts = client.get("/email-accounts", headers=auth_header).json()
+    account_id = accounts[0]["id"]
+
+    mock_verify.return_value = (False, "Reconnect required")
+    r = client.post(f"/email-accounts/{account_id}/sync", headers=auth_header)
+    assert r.status_code == 400
+    assert "Reconnect" in r.json()["detail"]
+
+
 # ── list accounts tests ─────────────────────────────────────────────────────
 
 def test_list_accounts_empty(client, auth_header):

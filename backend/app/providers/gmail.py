@@ -183,6 +183,41 @@ def _ensure_valid_token(
     return new_access
 
 
+def verify_gmail_connection(
+    account: EmailAccount, db_session
+) -> tuple[bool, str | None]:
+    """Validate OAuth: refresh if possible, otherwise ensure Gmail API accepts the token.
+
+    Returns (True, None) on success, (False, user-facing error message) on failure.
+    """
+    try:
+        creds = _get_credentials(account)
+        had_refresh = bool(creds.get("refresh_token"))
+        access_token = _ensure_valid_token(account, creds, db_session)
+        if not had_refresh:
+            resp = httpx.get(
+                f"{GMAIL_API_BASE}/profile",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=15,
+            )
+            if resp.status_code == 401:
+                return False, (
+                    "Gmail access expired. Reconnect your account in Settings."
+                )
+            resp.raise_for_status()
+    except TokenRefreshError:
+        return False, (
+            "Gmail authentication failed. Reconnect your account in Settings "
+            "(your Google session may have expired or access was revoked)."
+        )
+    except Exception:
+        logger.exception(
+            "verify_gmail_connection failed for account_id=%s", account.id
+        )
+        return False, "Could not verify Gmail connection. Try again or reconnect."
+    return True, None
+
+
 def _parse_message(raw: dict) -> FetchedMessage:
     """Parse a Gmail API messages.get(format=full) response."""
     payload = raw.get("payload", {})

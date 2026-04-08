@@ -10,6 +10,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import mimetypes
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formataddr, parsedate_to_datetime
@@ -24,6 +26,14 @@ logger = logging.getLogger(__name__)
 
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+
+@dataclass(frozen=True)
+class OutboundAttachment:
+    """File to attach to an outbound message (RFC 2045 MIME)."""
+    filename: str
+    data: bytes
+    content_type: str | None = None
 
 
 class TokenRefreshError(Exception):
@@ -75,6 +85,7 @@ class GmailProvider(EmailProvider):
         thread_id: str | None = None,
         references: str | None = None,
         in_reply_to: str | None = None,
+        attachments: list[OutboundAttachment] | None = None,
     ) -> SendResult:
         """Send an email via Gmail API. Optionally reply in thread with thread_id and headers."""
         if not to_addrs:
@@ -96,6 +107,19 @@ class GmailProvider(EmailProvider):
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
         msg.set_content(body_text or "", subtype="plain")
+        for att in attachments or []:
+            ctype = att.content_type or mimetypes.guess_type(att.filename)[0]
+            if not ctype:
+                ctype = "application/octet-stream"
+            maintype, _, subtype = ctype.partition("/")
+            if not subtype:
+                maintype, subtype = "application", "octet-stream"
+            msg.add_attachment(
+                att.data,
+                maintype=maintype,
+                subtype=subtype,
+                filename=att.filename,
+            )
 
         raw_bytes = msg.as_bytes()
         raw_b64 = base64.urlsafe_b64encode(raw_bytes).decode("ascii").rstrip("=")
@@ -105,11 +129,12 @@ class GmailProvider(EmailProvider):
             body["threadId"] = thread_id
 
         url = f"{GMAIL_API_BASE}/messages/send"
+        timeout = 120.0 if len(raw_bytes) > 2_000_000 else 30.0
         resp = httpx.post(
             url,
             json=body,
             headers={"Authorization": f"Bearer {access_token}"},
-            timeout=30,
+            timeout=timeout,
         )
         resp.raise_for_status()
         result = resp.json()

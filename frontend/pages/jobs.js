@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
@@ -24,6 +24,7 @@ import RadioGroup from "@mui/material/RadioGroup";
 import CircularProgress from "@mui/material/CircularProgress";
 import Link from "@mui/material/Link";
 import Paper from "@mui/material/Paper";
+import AttachFile from "@mui/icons-material/AttachFile";
 import {
   fetchJobs,
   fetchTimeline,
@@ -264,6 +265,89 @@ function normalizeEmail(input) {
   return s.includes("@") ? s : null;
 }
 
+function ExpandableTimelineBody({ bodyText, bodySnippet }) {
+  const [expanded, setExpanded] = useState(false);
+  const fullText = (bodyText || bodySnippet || "").trim();
+  if (!fullText) return null;
+
+  const previewText = bodySnippet || fullText;
+  const hasMore =
+    Boolean(bodyText && bodySnippet && bodyText.length > bodySnippet.length) ||
+    Boolean(bodyText && !bodySnippet && bodyText.length > 300);
+
+  const textSx = {
+    whiteSpace: "pre-wrap",
+    lineHeight: 1.4,
+    wordBreak: "break-word",
+  };
+
+  if (!hasMore) {
+    return (
+      <Typography variant="body2" color="text.secondary" component="div" sx={{ ...textSx, mt: 0.5 }}>
+        {fullText}
+      </Typography>
+    );
+  }
+
+  if (!expanded) {
+    return (
+      <Box sx={{ mt: 0.5 }}>
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          component="div"
+          sx={{
+            ...textSx,
+            maxHeight: 80,
+            overflow: "hidden",
+          }}
+        >
+          {previewText}
+        </Typography>
+        <Button
+          variant="text"
+          size="small"
+          onClick={() => setExpanded(true)}
+          sx={{ mt: 0.25, p: 0, minWidth: 0, textTransform: "none", fontSize: 13 }}
+        >
+          Show more
+        </Button>
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ mt: 0.5 }}>
+      <Box
+        sx={{
+          maxHeight: "min(50vh, 420px)",
+          overflowY: "auto",
+          pr: 0.5,
+          borderRadius: 1,
+          bgcolor: "action.hover",
+          px: 1.25,
+          py: 1,
+        }}
+      >
+        <Typography variant="body2" color="text.secondary" component="div" sx={{ ...textSx, lineHeight: 1.5 }}>
+          {bodyText || fullText}
+        </Typography>
+      </Box>
+      <Button
+        variant="text"
+        size="small"
+        onClick={() => setExpanded(false)}
+        sx={{ mt: 0.5, p: 0, minWidth: 0, textTransform: "none", fontSize: 13 }}
+      >
+        Show less
+      </Button>
+    </Box>
+  );
+}
+
+const MAX_REPLY_ATTACH_BYTES = 25 * 1024 * 1024;
+const MAX_REPLY_ATTACH_FILES = 15;
+
 function ReplyDraftModal({ open, onClose, jobId, draft, sourceMessageId, onDraftCreated, onSaved, onSent }) {
   const [subject, setSubject] = useState("");
   const [bodyText, setBodyText] = useState("");
@@ -276,6 +360,8 @@ function ReplyDraftModal({ open, onClose, jobId, draft, sourceMessageId, onDraft
   const [suggesting, setSuggesting] = useState(false);
   const [error, setError] = useState(null);
   const [selectedVariantId, setSelectedVariantId] = useState(null);
+  const [attachments, setAttachments] = useState([]);
+  const fileInputRef = useRef(null);
 
   const variants = draft?.variants && Array.isArray(draft.variants) ? draft.variants : [];
 
@@ -316,6 +402,36 @@ function ReplyDraftModal({ open, onClose, jobId, draft, sourceMessageId, onDraft
         });
     }
   }, [open, jobId, draft?.id, sourceMessageId]);
+
+  useEffect(() => {
+    if (open) {
+      setAttachments([]);
+    }
+  }, [open, draft?.id]);
+
+  const addAttachmentsFromInput = (e) => {
+    const picked = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (picked.length === 0) return;
+    setAttachments((prev) => {
+      const merged = [...prev, ...picked];
+      if (merged.length > MAX_REPLY_ATTACH_FILES) {
+        setError(`You can attach at most ${MAX_REPLY_ATTACH_FILES} files.`);
+        return prev;
+      }
+      const total = merged.reduce((s, f) => s + f.size, 0);
+      if (total > MAX_REPLY_ATTACH_BYTES) {
+        setError("Total attachment size must be 25MB or less.");
+        return prev;
+      }
+      setError(null);
+      return merged;
+    });
+  };
+
+  const removeAttachment = (index) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
 
   const handleSuggestReply = async () => {
     if (!jobId) return;
@@ -368,7 +484,11 @@ function ReplyDraftModal({ open, onClose, jobId, draft, sourceMessageId, onDraft
         });
         draftId = created.id;
       }
-      await sendDraft(draftId, { to_addrs: toAddrs, cc_addrs: ccAddrs });
+      await sendDraft(draftId, {
+        to_addrs: toAddrs,
+        cc_addrs: ccAddrs,
+        attachments: attachments.length > 0 ? attachments : undefined,
+      });
       onSent?.();
       onClose();
     } catch (err) {
@@ -471,6 +591,39 @@ function ReplyDraftModal({ open, onClose, jobId, draft, sourceMessageId, onDraft
           onChange={(e) => setBodyText(e.target.value)}
           placeholder={draft ? "Edit the reply..." : "Use Suggest Reply to generate a draft, or type your own."}
         />
+        <Box sx={{ mt: 2 }}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={addAttachmentsFromInput}
+          />
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<AttachFile />}
+            onClick={() => fileInputRef.current?.click()}
+            sx={{ mb: attachments.length > 0 ? 1 : 0 }}
+          >
+            Attach files
+          </Button>
+          {attachments.length > 0 && (
+            <Box sx={{ display: "flex", gap: 0.5, flexWrap: "wrap", alignItems: "center" }}>
+              {attachments.map((file, i) => (
+                <Chip
+                  key={`${i}-${file.name}-${file.size}-${file.lastModified}`}
+                  label={file.name}
+                  size="small"
+                  onDelete={() => removeAttachment(i)}
+                />
+              ))}
+            </Box>
+          )}
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+            Up to {MAX_REPLY_ATTACH_FILES} files, 25MB total (Gmail limit).
+          </Typography>
+        </Box>
         {draft && variants.length > 0 && (
           <Box sx={{ mt: 2, mb: 1 }}>
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
@@ -849,15 +1002,7 @@ function TimelineView({ timeline, onStageChange, onJobUpdate, onRequestDelete, o
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
                   {item.data.from_address}
                 </Typography>
-                {item.data.body_snippet && (
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ whiteSpace: "pre-wrap", maxHeight: 80, overflow: "hidden", lineHeight: 1.4 }}
-                  >
-                    {item.data.body_snippet}
-                  </Typography>
-                )}
+                <ExpandableTimelineBody bodyText={item.data.body_text} bodySnippet={item.data.body_snippet} />
                 <Typography component="time" variant="caption" color="text.secondary" display="block" sx={{ mt: 0.75 }}>
                   {item.data.date_header ? new Date(item.data.date_header).toLocaleString() : ""}
                 </Typography>
@@ -896,15 +1041,7 @@ function TimelineView({ timeline, onStageChange, onJobUpdate, onRequestDelete, o
                     })()}
                   </Typography>
                 )}
-                {item.data.body_snippet && (
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ whiteSpace: "pre-wrap", maxHeight: 80, overflow: "hidden", lineHeight: 1.4 }}
-                  >
-                    {item.data.body_snippet}
-                  </Typography>
-                )}
+                <ExpandableTimelineBody bodyText={item.data.body_text} bodySnippet={item.data.body_snippet} />
                 <Typography component="time" variant="caption" color="text.secondary" display="block" sx={{ mt: 0.75 }}>
                   {new Date(item.data.sent_at).toLocaleString()}
                 </Typography>

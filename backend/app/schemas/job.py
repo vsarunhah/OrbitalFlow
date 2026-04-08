@@ -97,6 +97,10 @@ class TimelineMessage(BaseModel):
     subject: str | None
     from_address: str | None
     date_header: datetime | None
+    body_text: str | None = Field(
+        None,
+        description="Full body for display (quoted replies stripped); use for in-app reading",
+    )
     body_snippet: str | None = Field(
         None, description="First ~300 chars of body_text (quoted replies stripped)"
     )
@@ -112,6 +116,7 @@ class TimelineSentMessage(BaseModel):
     id: uuid.UUID
     subject: str | None
     to_addrs_json: str = Field(..., description="JSON array of To addresses")
+    body_text: str | None = Field(None, description="Full body for in-app display")
     body_snippet: str | None = Field(None, description="First ~300 chars of body_text")
     provider_message_id: str | None = None
     sent_at: datetime

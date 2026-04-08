@@ -368,6 +368,51 @@ class TestDraftSend:
         assert call_kw["to_addrs"] == ["only-this@example.com"]
         assert call_kw.get("cc_addrs") in (None, [])
 
+    @patch("app.routers.drafts.GmailProvider")
+    @patch("app.routers.drafts.generate_reply_variants")
+    def test_send_draft_with_attachments_multipart(
+        self, mock_generate, mock_gmail_cls, client, auth_header, db_session
+    ):
+        mock_generate.return_value = _three_variants()
+        mock_gmail_cls.return_value.send_message.return_value = SendResult(
+            provider_message_id="gmail-msg-att",
+            thread_id="thread-123",
+        )
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+        user_id = uuid.UUID(r.json()["user_id"])
+
+        job, account, _, msg = _create_job_with_account_and_llm(db_session, tenant_id, user_id)
+        _create_contact_for_job(db_session, tenant_id, job.id)
+        db_session.commit()
+
+        create_resp = client.post(
+            f"/jobs/{job.id}/draft-reply",
+            headers=auth_header,
+            json={"source_message_id": str(msg.id)},
+        )
+        draft_id = create_resp.json()["draft"]["id"]
+
+        send_resp = client.post(
+            f"/drafts/{draft_id}/send",
+            headers=auth_header,
+            data={
+                "to_addrs": json.dumps(["recruiter@acme.com"]),
+                "cc_addrs": json.dumps([]),
+            },
+            files=[
+                ("attachments", ("notes.txt", b"hello attach", "text/plain")),
+            ],
+        )
+        assert send_resp.status_code == 200
+        assert send_resp.json()["status"] == "SENT"
+        mock_gmail_cls.return_value.send_message.assert_called_once()
+        call_kw = mock_gmail_cls.return_value.send_message.call_args[1]
+        atts = call_kw.get("attachments")
+        assert atts is not None and len(atts) == 1
+        assert atts[0].filename == "notes.txt"
+        assert atts[0].data == b"hello attach"
+
     def test_get_job_reply_recipients_without_draft(self, client, auth_header, db_session):
         """GET /jobs/{id}/reply-recipients returns default reply-all before any draft exists."""
         r = client.get("/auth/me", headers=auth_header)

@@ -484,6 +484,7 @@ def get_timeline(
             subject=m.subject,
             from_address=m.from_address,
             date_header=m.date_header,
+            body_text=cleaned if cleaned else None,
             body_snippet=snippet,
             provider_msg_id=m.provider_msg_id,
         )
@@ -525,6 +526,7 @@ def get_timeline(
             id=s.id,
             subject=s.subject,
             to_addrs_json=s.to_addrs_json,
+            body_text=body if body else None,
             body_snippet=snippet,
             provider_message_id=s.provider_message_id,
             sent_at=s.sent_at,

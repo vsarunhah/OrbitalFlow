@@ -289,7 +289,30 @@ export function createComposeDraft(jobId, { sourceMessageId, subject, body_text 
   });
 }
 
-export function sendDraft(draftId, { to_addrs, cc_addrs } = {}) {
+export async function sendDraft(draftId, { to_addrs, cc_addrs, attachments = [] } = {}) {
+  if (attachments && attachments.length > 0) {
+    const form = new FormData();
+    form.append("to_addrs", JSON.stringify(to_addrs ?? []));
+    form.append("cc_addrs", JSON.stringify(cc_addrs ?? []));
+    attachments.forEach((f) => form.append("attachments", f));
+    const token = getToken();
+    const headers = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${API}/drafts/${draftId}/send`, {
+      method: "POST",
+      headers,
+      body: form,
+    });
+    if (!res.ok) {
+      if (res.status === 401 && token) {
+        clearToken();
+        if (typeof window !== "undefined") window.location.href = "/login";
+      }
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${res.status}`);
+    }
+    return res.json();
+  }
   const body =
     to_addrs != null
       ? { to_addrs: to_addrs || [], cc_addrs: cc_addrs || [] }

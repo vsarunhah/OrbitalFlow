@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import AuthContext, get_current_user
@@ -16,7 +17,7 @@ from app.models.email_account import EmailAccount
 from app.models.job import Job, JobEvent, JobThread
 from app.models.message import Message
 from app.models.user import User
-from app.providers.gmail import GmailProvider, TokenRefreshError
+from app.providers.gmail import GmailProvider, OutboundAttachment, TokenRefreshError
 from app.schemas.draft import (
     ComposeDraftRequest,
     DraftRecipientsResponse,
@@ -32,6 +33,10 @@ from app.services.job_processing import _parse_email_address
 from app.services.reply_generation import generate_reply_variants
 
 logger = logging.getLogger(__name__)
+
+# Gmail total message size limit (RFC 5322); stay under to avoid API errors.
+_MAX_SEND_BYTES = 25 * 1024 * 1024
+_MAX_ATTACHMENT_FILES = 15
 
 
 def _reply_subject_from_original(original_subject: str | None) -> str:
@@ -611,14 +616,92 @@ def get_draft_recipients(
     return DraftRecipientsResponse(to_addrs=to_addrs, cc_addrs=cc_addrs)
 
 
+async def _parse_send_draft_request(
+    request: Request,
+) -> tuple[SendDraftRequest | None, list[OutboundAttachment]]:
+    """JSON body, or multipart with form fields to_addrs/cc_addrs (JSON strings) and attachment file parts."""
+    ct = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in ct:
+        form = await request.form()
+        body_req: SendDraftRequest | None = None
+        to_str = form.get("to_addrs")
+        cc_str = form.get("cc_addrs")
+        if to_str is not None or cc_str is not None:
+            try:
+                to_list = json.loads(to_str) if (to_str is not None and str(to_str).strip()) else None
+                cc_list = json.loads(cc_str) if (cc_str is not None and str(cc_str).strip()) else None
+                body_req = SendDraftRequest(to_addrs=to_list, cc_addrs=cc_list)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid JSON in to_addrs or cc_addrs: {e}",
+                ) from e
+        attachments: list[OutboundAttachment] = []
+        n_files = 0
+        for key, value in form.multi_items():
+            if key != "attachments":
+                continue
+            if not hasattr(value, "read"):
+                continue
+            n_files += 1
+            if n_files > _MAX_ATTACHMENT_FILES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Too many attachments (max {_MAX_ATTACHMENT_FILES}).",
+                )
+            upload = value
+            raw_name = upload.filename or "attachment"
+            safe_name = os.path.basename(raw_name).strip() or "attachment"
+            data = await upload.read()
+            ctype = upload.content_type
+            if ctype == "application/octet-stream":
+                ctype = None
+            attachments.append(
+                OutboundAttachment(
+                    filename=safe_name,
+                    data=data,
+                    content_type=ctype,
+                )
+            )
+        total = sum(len(a.data) for a in attachments)
+        if total > _MAX_SEND_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attachments exceed maximum total size (25MB).",
+            )
+        return body_req, attachments
+
+    if "application/json" in ct:
+        raw = await request.body()
+        if not raw:
+            return None, []
+        try:
+            body_req = SendDraftRequest.model_validate_json(raw)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid JSON body: {e}",
+            ) from e
+        return body_req, []
+
+    raw = await request.body()
+    if raw:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported Content-Type for send (use application/json or multipart/form-data).",
+        )
+    return None, []
+
+
 @router.post("/{draft_id}/send", response_model=MessageDraftSchema)
-def send_draft(
+async def send_draft(
     draft_id: uuid.UUID,
-    body: SendDraftRequest | None = None,
+    request: Request,
     auth: AuthContext = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Send the draft via Gmail. Optional body: to_addrs/cc_addrs override default reply-all (e.g. after user removed some)."""
+    body, outbound_attachments = await _parse_send_draft_request(request)
     draft = (
         db.query(MessageDraft)
         .filter(
@@ -661,7 +744,7 @@ def send_draft(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    if body and body.to_addrs is not None:
+    if body is not None and body.to_addrs is not None:
         to_addrs = [a.strip() for a in body.to_addrs if a and a.strip()]
         cc_addrs = [a.strip() for a in (body.cc_addrs or []) if a and a.strip()]
     if not to_addrs:
@@ -679,6 +762,7 @@ def send_draft(
             body_text=draft.body_text or "",
             cc_addrs=cc_addrs if cc_addrs else None,
             thread_id=thread_id,
+            attachments=outbound_attachments or None,
         )
     except ValueError as e:
         draft.status = "FAILED"

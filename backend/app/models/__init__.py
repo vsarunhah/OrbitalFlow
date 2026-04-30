@@ -8,6 +8,7 @@ from app.models.job import (
     JobManualChange,
     JobStageHistory,
     JobThread,
+    JobTimelineReadState,
 )
 from app.models.llm_key import LlmKey
 from app.models.merge_suggestion import JobMergeSuggestion
@@ -32,6 +33,7 @@ __all__ = [
     "JobMergeSuggestion",
     "JobStageHistory",
     "JobThread",
+    "JobTimelineReadState",
     "LlmKey",
     "Message",
     "MessageExtraction",

@@ -8,6 +8,7 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -20,6 +21,7 @@ class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (
         Index("ix_jobs_tenant_id", "tenant_id"),
+        Index("ix_jobs_tenant_updated_at", "tenant_id", "updated_at"),
         Index("ix_jobs_company_role", "tenant_id", "company", "role"),
         Index("ix_jobs_req_id", "tenant_id", "req_id"),
     )
@@ -56,6 +58,46 @@ class Job(Base):
     stage_history: Mapped[list["JobStageHistory"]] = relationship(
         back_populates="job", order_by="JobStageHistory.created_at"
     )
+    timeline_read_states: Mapped[list["JobTimelineReadState"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+
+
+class JobTimelineReadState(Base):
+    """When the user last opened this job's timeline; used for 'new incoming' badges."""
+
+    __tablename__ = "job_timeline_read_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "user_id",
+            "job_id",
+            name="uq_job_timeline_read_tenant_user_job",
+        ),
+        Index("ix_job_timeline_read_tenant_user", "tenant_id", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("tenants.id"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    needs_reply_dismissed_up_to_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    job: Mapped["Job"] = relationship(back_populates="timeline_read_states")
 
 
 class JobThread(Base):

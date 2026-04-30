@@ -39,8 +39,21 @@ async function request(path, { method = "GET", body, params } = {}) {
   return res.json();
 }
 
-export function fetchJobs({ query, stage, limit = 50, offset = 0 } = {}) {
-  return request("/jobs", { params: { query, stage, limit, offset } });
+export function fetchJobs({ query, stage, limit = 50, offset = 0, unreadOnly = false } = {}) {
+  const params = { query, stage, limit, offset };
+  if (unreadOnly) params.unread_only = true;
+  return request("/jobs", { params });
+}
+
+export function setJobTimelineReadState(jobId, read) {
+  return request(`/jobs/${jobId}/timeline-read`, {
+    method: "POST",
+    body: { read },
+  });
+}
+
+export function dismissNeedsReply(jobId) {
+  return request(`/jobs/${jobId}/dismiss-needs-reply`, { method: "POST" });
 }
 
 export function fetchJob(jobId) {
@@ -182,6 +195,10 @@ export function startGmailOAuth() {
   return request("/email-accounts/gmail/start-oauth", { method: "POST" });
 }
 
+export function startCalendarOAuth() {
+  return request("/email-accounts/calendar/start-oauth", { method: "POST" });
+}
+
 export function listEmailAccounts() {
   return request("/email-accounts");
 }
@@ -275,6 +292,34 @@ export function getDraftRecipients(draftId) {
 export function getJobReplyRecipients(jobId, sourceMessageId = null) {
   const params = sourceMessageId ? { source_message_id: sourceMessageId } : {};
   return request(`/jobs/${jobId}/reply-recipients`, { params });
+}
+
+export function fetchAvailabilitySlots({
+  jobId,
+  durationMinutes,
+  timezone,
+  dateStart,
+  dateEnd,
+  workdayStart = "09:00:00",
+  workdayEnd = "17:00:00",
+  slotGranularityMinutes = 30,
+  minNoticeMinutes = 60,
+} = {}) {
+  return request("/calendar/availability/slots", {
+    method: "POST",
+    body: {
+      job_id: jobId,
+      duration_minutes: durationMinutes,
+      timezone,
+      date_start: dateStart,
+      date_end: dateEnd,
+      workday_start: workdayStart,
+      workday_end: workdayEnd,
+      slot_granularity_minutes: slotGranularityMinutes,
+      min_notice_minutes: minNoticeMinutes,
+      calendar_ids: ["primary"],
+    },
+  });
 }
 
 /** Create a draft without AI (user subject/body). Use when sending without Suggest Reply. */

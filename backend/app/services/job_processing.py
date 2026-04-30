@@ -40,6 +40,31 @@ logger = logging.getLogger(__name__)
 FUZZY_THRESHOLD = 0.75
 
 
+def _dt_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def message_activity_at(message: Message) -> datetime:
+    """Prefer the email Date header, then the message row timestamp."""
+    if message.date_header:
+        return _dt_utc(message.date_header)
+    if message.created_at:
+        return _dt_utc(message.created_at)
+    return datetime.now(timezone.utc)
+
+
+def bump_job_last_activity_if_newer(job: Job, at: datetime) -> None:
+    """Keep Job.last_activity as the latest known thread activity (updates Job.updated_at)."""
+    at = _dt_utc(at)
+    if job.last_activity is None:
+        job.last_activity = at
+        return
+    if at > _dt_utc(job.last_activity):
+        job.last_activity = at
+
+
 def process_extraction_for_job(
     db: Session,
     message: Message,
@@ -60,7 +85,7 @@ def process_extraction_for_job(
     created = False
 
     if job is None:
-        job = _create_job(db, tenant_id, extraction)
+        job = _create_job(db, tenant_id, extraction, message)
         created = True
 
     _ensure_thread_link(db, tenant_id, job, message)
@@ -106,7 +131,7 @@ def process_extraction_for_job(
         )
         db.add(history)
 
-    job.last_activity = datetime.now(timezone.utc)
+    bump_job_last_activity_if_newer(job, message_activity_at(message))
     db.commit()
 
     logger.info(
@@ -218,6 +243,7 @@ def _create_job(
     db: Session,
     tenant_id: uuid.UUID,
     extraction: MessageExtraction,
+    message: Message,
 ) -> Job:
     job = Job(
         tenant_id=tenant_id,
@@ -225,7 +251,7 @@ def _create_job(
         role=extraction.role,
         req_id=extraction.req_id,
         current_stage=JobStage.SOURCED.value,
-        last_activity=datetime.now(timezone.utc),
+        last_activity=message_activity_at(message),
     )
     db.add(job)
     db.flush()

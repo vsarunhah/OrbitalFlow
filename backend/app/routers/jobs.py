@@ -20,6 +20,7 @@ from app.models.job import (
     JobManualChange,
     JobStageHistory,
     JobThread,
+    JobTimelineReadState,
 )
 from app.models.message import Message
 from app.models.draft import MessageDraft, SentMessage
@@ -34,6 +35,7 @@ from app.schemas.job import (
     JobUpdate,
     ManualStageChange,
     NextAction,
+    TimelineReadStateBody,
     TimelineEvent,
     TimelineMessage,
     TimelineSentMessage,
@@ -49,13 +51,64 @@ from app.schemas.draft import (
 )
 from app.services.followup_generation import generate_followup_suggestion
 from app.services.job_merge import merge_job_into_target
+from app.services.job_messages import load_accounts_for_messages, load_messages_for_jobs
+from app.services.job_read_state import (
+    MAX_UNREAD_FILTER_SCAN,
+    count_incoming_after_last_seen,
+    load_last_seen_map,
+    load_needs_reply_dismissal_map,
+    mark_timeline_unread,
+    ordered_job_ids_with_unread_incoming,
+    set_needs_reply_dismissed_for_job,
+    upsert_timeline_last_seen,
+    user_email_lower_for,
+)
 from app.services.next_action import (
     compute_next_actions_for_jobs,
+    infer_owner_email,
+    needs_reply_dismissal_target_message_id,
     suggest_followup_for_next_action,
 )
 from app.routers import drafts as drafts_router
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+def _build_job_detail(db: Session, auth: AuthContext, job: Job) -> JobDetail:
+    messages_by_job = load_messages_for_jobs(db, auth.tenant_id, [job])
+    accounts_by_id = load_accounts_for_messages(db, messages_by_job)
+    dismiss_map = load_needs_reply_dismissal_map(
+        db, auth.tenant_id, auth.user_id, [job.id]
+    )
+    na_map = compute_next_actions_for_jobs(
+        db=db,
+        tenant_id=auth.tenant_id,
+        jobs=[job],
+        messages_by_job=messages_by_job,
+        needs_reply_dismissed_message_by_job=dismiss_map,
+    )
+    na_data = na_map.get(job.id)
+    user_email_l = user_email_lower_for(db, auth.tenant_id, auth.user_id)
+    last_seen_map = load_last_seen_map(db, auth.tenant_id, auth.user_id, [job.id])
+    detail = JobDetail.model_validate(job)
+    detail.next_action = (
+        NextAction(
+            type=na_data.type,
+            label=na_data.label,
+            due_at=na_data.due_at,
+            scheduling_link=na_data.scheduling_link,
+        )
+        if na_data
+        else None
+    )
+    detail.suggest_followup = suggest_followup_for_next_action(na_data)
+    detail.unread_incoming_count = count_incoming_after_last_seen(
+        messages_by_job.get(job.id, []),
+        accounts_by_id,
+        user_email_l,
+        last_seen_map.get(job.id),
+    )
+    return detail
 
 
 @router.post("/merge", response_model=JobsMergeResult)
@@ -109,6 +162,7 @@ def merge_jobs(
 def list_jobs(
     query: Optional[str] = Query(None, description="Full-text search over message bodies"),
     stage: Optional[str] = Query(None, description="Filter by current_stage (e.g. APPLIED,INTERVIEW)"),
+    unread_only: bool = Query(False, description="Only jobs with new inbound email since last timeline view"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     auth: AuthContext = Depends(get_current_user),
@@ -167,20 +221,42 @@ def list_jobs(
             | Job.role.ilike(like_pattern)
         )
 
-    total = base_q.count()
+    ordered_q = base_q.order_by(Job.updated_at.desc(), Job.created_at.desc())
 
-    rows: list[Job] = (
-        base_q
-        .order_by(Job.last_activity.desc().nullslast(), Job.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
+    if unread_only:
+        id_tuples = ordered_q.with_entities(Job.id).limit(MAX_UNREAD_FILTER_SCAN).all()
+        ordered_ids = [t[0] for t in id_tuples]
+        unread_ordered = ordered_job_ids_with_unread_incoming(
+            db, auth.tenant_id, auth.user_id, ordered_ids
+        )
+        total = len(unread_ordered)
+        page_ids = unread_ordered[offset : offset + limit]
+        if not page_ids:
+            return JobListResponse(items=[], total=total)
+        by_id = {
+            j.id: j
+            for j in db.query(Job).filter(Job.id.in_(page_ids)).all()
+        }
+        rows = [by_id[i] for i in page_ids if i in by_id]
+    else:
+        total = base_q.count()
+        rows = ordered_q.offset(offset).limit(limit).all()
+
+    messages_by_job = load_messages_for_jobs(db, auth.tenant_id, rows)
+    accounts_by_id = load_accounts_for_messages(db, messages_by_job)
+    dismiss_map = load_needs_reply_dismissal_map(
+        db, auth.tenant_id, auth.user_id, [r.id for r in rows]
     )
-
     next_actions_by_job = compute_next_actions_for_jobs(
         db=db,
         tenant_id=auth.tenant_id,
         jobs=rows,
+        messages_by_job=messages_by_job,
+        needs_reply_dismissed_message_by_job=dismiss_map,
+    )
+    user_email_l = user_email_lower_for(db, auth.tenant_id, auth.user_id)
+    last_seen_map = load_last_seen_map(
+        db, auth.tenant_id, auth.user_id, [r.id for r in rows]
     )
 
     summaries: list[JobSummary] = []
@@ -198,6 +274,13 @@ def list_jobs(
             else None
         )
         summary.suggest_followup = suggest_followup_for_next_action(na_data)
+        msgs = messages_by_job.get(row.id, [])
+        summary.unread_incoming_count = count_incoming_after_last_seen(
+            msgs,
+            accounts_by_id,
+            user_email_l,
+            last_seen_map.get(row.id),
+        )
         summaries.append(summary)
 
     return JobListResponse(
@@ -223,6 +306,7 @@ def delete_job(
     # Clean up all dependent rows that reference this job to satisfy FK constraints.
     db.query(MessageDraft).filter(MessageDraft.job_id == job_id).delete()
     db.query(SentMessage).filter(SentMessage.job_id == job_id).delete()
+    db.query(JobTimelineReadState).filter(JobTimelineReadState.job_id == job_id).delete()
     db.query(JobEvent).filter(JobEvent.job_id == job_id).delete()
     db.query(JobThread).filter(JobThread.job_id == job_id).delete()
     db.query(JobStageHistory).filter(JobStageHistory.job_id == job_id).delete()
@@ -287,7 +371,15 @@ def create_followup_suggestion(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Job not found",
         )
-    na_map = compute_next_actions_for_jobs(db=db, tenant_id=auth.tenant_id, jobs=[job])
+    dismiss_map = load_needs_reply_dismissal_map(
+        db, auth.tenant_id, auth.user_id, [job.id]
+    )
+    na_map = compute_next_actions_for_jobs(
+        db=db,
+        tenant_id=auth.tenant_id,
+        jobs=[job],
+        needs_reply_dismissed_message_by_job=dismiss_map,
+    )
     na_data = na_map.get(job.id)
     if not suggest_followup_for_next_action(na_data):
         raise HTTPException(
@@ -337,26 +429,66 @@ def get_job(
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-    na_map = compute_next_actions_for_jobs(
-        db=db,
-        tenant_id=auth.tenant_id,
-        jobs=[job],
-    )
-    na_data = na_map.get(job.id)
+    return _build_job_detail(db, auth, job)
 
-    detail = JobDetail.model_validate(job)
-    detail.next_action = (
-        NextAction(
-            type=na_data.type,
-            label=na_data.label,
-            due_at=na_data.due_at,
-            scheduling_link=na_data.scheduling_link,
-        )
-        if na_data
-        else None
+
+@router.post("/{job_id}/timeline-read", response_model=JobDetail)
+def set_timeline_read_state(
+    job_id: uuid.UUID,
+    body: TimelineReadStateBody,
+    auth: AuthContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark the job timeline read (caught up) or unread without loading the timeline."""
+    job = (
+        db.query(Job)
+        .filter(Job.id == job_id, Job.tenant_id == auth.tenant_id)
+        .first()
     )
-    detail.suggest_followup = suggest_followup_for_next_action(na_data)
-    return detail
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    if body.read:
+        upsert_timeline_last_seen(db, auth.tenant_id, auth.user_id, job_id)
+    else:
+        mark_timeline_unread(db, auth.tenant_id, auth.user_id, job)
+
+    db.commit()
+    db.refresh(job)
+    return _build_job_detail(db, auth, job)
+
+
+@router.post("/{job_id}/dismiss-needs-reply", response_model=JobDetail)
+def dismiss_needs_reply(
+    job_id: uuid.UUID,
+    auth: AuthContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark the current 'needs reply' / follow-up nudge as not applicable for this message."""
+    job = (
+        db.query(Job)
+        .filter(Job.id == job_id, Job.tenant_id == auth.tenant_id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    messages_by_job = load_messages_for_jobs(db, auth.tenant_id, [job])
+    msgs = messages_by_job.get(job.id, [])
+    accounts_by_id = load_accounts_for_messages(db, messages_by_job)
+    owner = infer_owner_email(msgs, accounts_by_id)
+    target = needs_reply_dismissal_target_message_id(job, msgs, owner)
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="There is no incoming message from the other party to dismiss.",
+        )
+    set_needs_reply_dismissed_for_job(
+        db, auth.tenant_id, auth.user_id, job, target
+    )
+    db.commit()
+    db.refresh(job)
+    return _build_job_detail(db, auth, job)
 
 
 @router.get("/{job_id}/draft", response_model=MessageDraftSchema)
@@ -425,7 +557,7 @@ def update_job(
     job.last_activity = datetime.now(timezone.utc)
     db.commit()
     db.refresh(job)
-    return job
+    return _build_job_detail(db, auth, job)
 
 
 @router.get("/{job_id}/timeline", response_model=JobTimeline)
@@ -479,6 +611,7 @@ def get_timeline(
         raw = (m.body_text or "").strip()
         cleaned = strip_quoted_replies(raw) if raw else ""
         snippet = cleaned[:300] if cleaned else None
+        raw_html = (m.body_html or "").strip()
         return TimelineMessage(
             id=m.id,
             subject=m.subject,
@@ -486,28 +619,11 @@ def get_timeline(
             date_header=m.date_header,
             body_text=cleaned if cleaned else None,
             body_snippet=snippet,
+            body_html=raw_html if raw_html else None,
             provider_msg_id=m.provider_msg_id,
         )
 
-    na_map = compute_next_actions_for_jobs(
-        db=db,
-        tenant_id=auth.tenant_id,
-        jobs=[job],
-    )
-    na_data = na_map.get(job.id)
-
-    job_detail = JobDetail.model_validate(job)
-    job_detail.next_action = (
-        NextAction(
-            type=na_data.type,
-            label=na_data.label,
-            due_at=na_data.due_at,
-            scheduling_link=na_data.scheduling_link,
-        )
-        if na_data
-        else None
-    )
-    job_detail.suggest_followup = suggest_followup_for_next_action(na_data)
+    job_detail = _build_job_detail(db, auth, job)
 
     sent_list = (
         db.query(SentMessage)
@@ -532,12 +648,16 @@ def get_timeline(
             sent_at=s.sent_at,
         )
 
-    return JobTimeline(
+    result = JobTimeline(
         job=job_detail,
         events=[TimelineEvent.model_validate(e) for e in events],
         messages=[to_timeline_message(m) for m in msgs],
         sent_messages=[to_timeline_sent(s) for s in sent_list],
     )
+    upsert_timeline_last_seen(db, auth.tenant_id, auth.user_id, job.id)
+    db.commit()
+    result.job.unread_incoming_count = 0
+    return result
 
 
 @router.post("/{job_id}/stage", response_model=JobDetail)
@@ -602,4 +722,4 @@ def manual_stage_override(
 
     db.commit()
     db.refresh(job)
-    return job
+    return _build_job_detail(db, auth, job)

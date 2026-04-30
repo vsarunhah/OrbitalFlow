@@ -56,6 +56,10 @@ class ManualStageChange(BaseModel):
     reason: str = Field(max_length=512)
 
 
+class TimelineReadStateBody(BaseModel):
+    read: bool = Field(..., description="True = mark timeline read (caught up); false = mark unread")
+
+
 class JobSummary(BaseModel):
     id: uuid.UUID
     company: str | None
@@ -68,6 +72,10 @@ class JobSummary(BaseModel):
     suggest_followup: bool = Field(
         False,
         description="When true, show 'Generate Follow-Up' (job is stalled or ghosted)",
+    )
+    unread_incoming_count: int = Field(
+        0,
+        description="Inbound emails on this job since you last opened its timeline",
     )
     created_at: datetime
 
@@ -103,6 +111,10 @@ class TimelineMessage(BaseModel):
     )
     body_snippet: str | None = Field(
         None, description="First ~300 chars of body_text (quoted replies stripped)"
+    )
+    body_html: str | None = Field(
+        None,
+        description="Original HTML body when available; sanitize before rendering in the client",
     )
     provider_msg_id: str | None = Field(
         None, description="Gmail message ID, used to construct a link to the email"

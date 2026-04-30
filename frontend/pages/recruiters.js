@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
@@ -21,6 +21,8 @@ import RadioGroup from "@mui/material/RadioGroup";
 import CircularProgress from "@mui/material/CircularProgress";
 import { fetchRecruiters, fetchRecruiter, deleteRecruiter, mergeRecruiters } from "../lib/api";
 import ConfirmModal from "../components/ConfirmModal";
+
+const SEARCH_DEBOUNCE_MS = 350;
 
 const STAGE_COLORS = {
   SOURCED: "#6b7280",
@@ -128,7 +130,7 @@ function RecruiterCard({ recruiter, selected, selectedForMerge, mergeMode, onTog
   );
 }
 
-function SearchBar({ value, onChange, onSearch }) {
+function SearchBar({ value, onChange, onFlushSearch }) {
   return (
     <Box sx={{ display: "flex", gap: 1, p: 1.5 }}>
       <TextField
@@ -136,10 +138,10 @@ function SearchBar({ value, onChange, onSearch }) {
         placeholder="Search by name or email..."
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && onSearch()}
+        onKeyDown={(e) => e.key === "Enter" && onFlushSearch()}
         sx={{ flex: 1 }}
       />
-      <Button variant="contained" onClick={onSearch}>
+      <Button variant="contained" onClick={onFlushSearch}>
         Search
       </Button>
     </Box>
@@ -335,6 +337,8 @@ export default function RecruitersPage() {
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const searchDebounceRef = useRef(null);
   const [mergeMode, setMergeMode] = useState(false);
   const [mergeSelectedIds, setMergeSelectedIds] = useState(new Set());
   const [showMergeModal, setShowMergeModal] = useState(false);
@@ -345,7 +349,8 @@ export default function RecruitersPage() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchRecruiters({ query: searchQuery || undefined });
+      const q = (debouncedSearch || "").trim() || undefined;
+      const data = await fetchRecruiters({ query: q });
       setRecruiters(data.items);
       setTotal(data.total);
     } catch (err) {
@@ -353,11 +358,30 @@ export default function RecruitersPage() {
     } finally {
       setLoading(false);
     }
+  }, [debouncedSearch]);
+
+  useEffect(() => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      searchDebounceRef.current = null;
+      setDebouncedSearch((searchQuery || "").trim());
+    }, SEARCH_DEBOUNCE_MS);
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
   }, [searchQuery]);
 
   useEffect(() => {
-    loadList();
+    void loadList();
   }, [loadList]);
+
+  const flushRecruiterSearch = useCallback(() => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+    setDebouncedSearch((searchQuery || "").trim());
+  }, [searchQuery]);
 
   async function handleDeleteRecruiter(recruiterId) {
     try {
@@ -457,7 +481,7 @@ export default function RecruitersPage() {
             </Box>
           )}
         </Box>
-        <SearchBar value={searchQuery} onChange={setSearchQuery} onSearch={loadList} />
+        <SearchBar value={searchQuery} onChange={setSearchQuery} onFlushSearch={flushRecruiterSearch} />
         <Typography variant="body2" color="text.secondary" sx={{ px: 2, pb: 1 }}>
           {loading ? "Loading..." : `${total} recruiter${total !== 1 ? "s" : ""}`}
         </Typography>

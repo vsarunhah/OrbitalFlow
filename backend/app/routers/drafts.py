@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -29,7 +30,7 @@ from app.schemas.draft import (
     ReplyVariantSchema,
     SendDraftRequest,
 )
-from app.services.job_processing import _parse_email_address
+from app.services.job_processing import _parse_email_address, bump_job_last_activity_if_newer
 from app.services.reply_generation import generate_reply_variants
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 # Gmail total message size limit (RFC 5322); stay under to avoid API errors.
 _MAX_SEND_BYTES = 25 * 1024 * 1024
 _MAX_ATTACHMENT_FILES = 15
+_UNRESOLVED_AVAILABILITY_MARKERS = ("[availability]", "{{AVAILABILITY}}")
 
 
 def _reply_subject_from_original(original_subject: str | None) -> str:
@@ -752,6 +754,12 @@ async def send_draft(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one To address is required.",
         )
+    body_text = draft.body_text or ""
+    if any(marker in body_text for marker in _UNRESOLVED_AVAILABILITY_MARKERS):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Resolve the availability placeholder before sending.",
+        )
 
     provider = GmailProvider(db_session=db)
     try:
@@ -801,6 +809,15 @@ async def send_draft(
         body_text=draft.body_text,
     )
     db.add(sent)
+    db.flush()
+
+    job_row = (
+        db.query(Job)
+        .filter(Job.id == draft.job_id, Job.tenant_id == auth.tenant_id)
+        .first()
+    )
+    if job_row:
+        bump_job_last_activity_if_newer(job_row, sent.sent_at or datetime.now(timezone.utc))
 
     draft.status = "SENT"
     db.add(

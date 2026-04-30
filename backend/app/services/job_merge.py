@@ -8,7 +8,15 @@ from sqlalchemy.orm import Session
 
 from app.models.contact import JobContact
 from app.models.draft import MessageDraft, SentMessage
-from app.models.job import Job, JobEvent, JobIdentity, JobStageHistory, JobThread
+from app.models.job import (
+    Job,
+    JobEvent,
+    JobIdentity,
+    JobManualChange,
+    JobStageHistory,
+    JobThread,
+    JobTimelineReadState,
+)
 
 
 def merge_job_into_target(
@@ -74,6 +82,11 @@ def merge_job_into_target(
         {"job_id": target.id}, synchronize_session=False
     )
 
+    # Re-point manual override audit rows so the source job can be deleted
+    db.query(JobManualChange).filter(JobManualChange.job_id == source.id).update(
+        {"job_id": target.id}, synchronize_session=False
+    )
+
     db.flush()
 
     # Update target's last_activity to the latest of both
@@ -82,4 +95,45 @@ def merge_job_into_target(
     ):
         target.last_activity = source.last_activity
 
+    _merge_timeline_read_states(db, source, target)
+
     db.delete(source)
+
+
+def _merge_timeline_read_states(db: Session, source: Job, target: Job) -> None:
+    """Per user, take min(source.last_seen_at, target.last_seen_at). Missing row means
+    "never opened" and dominates: if either side has no row for this user, the merged
+    state is also "never opened" (delete target's row if any). Source's row is removed
+    via FK cascade when source is deleted, so we only mutate target-side rows here.
+    """
+    source_states = {
+        (s.tenant_id, s.user_id): s
+        for s in db.query(JobTimelineReadState)
+        .filter(JobTimelineReadState.job_id == source.id)
+        .all()
+    }
+    target_states = {
+        (t.tenant_id, t.user_id): t
+        for t in db.query(JobTimelineReadState)
+        .filter(JobTimelineReadState.job_id == target.id)
+        .all()
+    }
+
+    all_keys = set(source_states.keys()) | set(target_states.keys())
+    for key in all_keys:
+        src = source_states.get(key)
+        tgt = target_states.get(key)
+        if src is None and tgt is not None:
+            db.delete(tgt)
+            continue
+        if src is not None and tgt is not None:
+            s_ts = src.last_seen_at
+            t_ts = tgt.last_seen_at
+            if s_ts is not None and s_ts.tzinfo is None:
+                s_ts = s_ts.replace(tzinfo=timezone.utc)
+            if t_ts is not None and t_ts.tzinfo is None:
+                t_ts = t_ts.replace(tzinfo=timezone.utc)
+            tgt.last_seen_at = min(s_ts, t_ts)
+            # Avoid stale per-message dismiss on merged thread
+            tgt.needs_reply_dismissed_up_to_message_id = None
+    db.flush()

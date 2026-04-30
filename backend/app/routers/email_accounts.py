@@ -34,18 +34,21 @@ GMAIL_SCOPES = (
     "https://www.googleapis.com/auth/gmail.modify "
     "https://www.googleapis.com/auth/gmail.send"
 )
+GOOGLE_CALENDAR_FREEBUSY_SCOPE = "https://www.googleapis.com/auth/calendar.freebusy"
+GOOGLE_CALENDAR_SCOPES = f"{GMAIL_SCOPES} {GOOGLE_CALENDAR_FREEBUSY_SCOPE}"
 
 DEFAULT_SYNC_CURSOR = json.dumps({"history_id": None, "last_polled_at": None})
 
 
-def _build_google_auth_url(state: str) -> str:
+def _build_google_auth_url(state: str, scopes: str = GMAIL_SCOPES) -> str:
     params = {
         "client_id": settings.google_client_id,
         "redirect_uri": settings.google_redirect_uri,
         "response_type": "code",
-        "scope": GMAIL_SCOPES,
+        "scope": scopes,
         "access_type": "offline",
         "prompt": "consent",
+        "include_granted_scopes": "true",
         "state": state,
     }
     return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
@@ -67,6 +70,26 @@ def start_gmail_oauth(
     return OAuthStartResponse(auth_url=auth_url)
 
 
+@router.post("/calendar/start-oauth", response_model=OAuthStartResponse)
+def start_calendar_oauth(
+    auth: AuthContext = Depends(get_current_user),
+) -> OAuthStartResponse:
+    if not settings.google_client_id or not settings.google_client_secret:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google OAuth is not configured on the server",
+        )
+    state_token = create_access_token(
+        {
+            "sub": str(auth.user_id),
+            "tenant_id": str(auth.tenant_id),
+            "purpose": "calendar_oauth",
+        }
+    )
+    auth_url = _build_google_auth_url(state_token, GOOGLE_CALENDAR_SCOPES)
+    return OAuthStartResponse(auth_url=auth_url)
+
+
 @router.get("/gmail/oauth-callback")
 def gmail_oauth_callback(
     code: str = Query(...),
@@ -74,7 +97,8 @@ def gmail_oauth_callback(
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
     payload = decode_access_token(state)
-    if payload is None or payload.get("purpose") != "oauth":
+    purpose = payload.get("purpose") if payload else None
+    if payload is None or purpose not in {"oauth", "calendar_oauth"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired state"
         )
@@ -85,16 +109,6 @@ def gmail_oauth_callback(
     email_address = user_info["email"]
     display_name = user_info.get("name") or None
 
-    oauth_blob = json.dumps(
-        {
-            "access_token": token_data["access_token"],
-            "refresh_token": token_data.get("refresh_token"),
-            "token_uri": GOOGLE_TOKEN_URL,
-            "scopes": GMAIL_SCOPES,
-            "expires_in": token_data.get("expires_in"),
-        }
-    )
-
     existing = (
         db.query(EmailAccount)
         .filter(
@@ -102,6 +116,27 @@ def gmail_oauth_callback(
             EmailAccount.email_address == email_address,
         )
         .first()
+    )
+    existing_refresh_token = None
+    if existing:
+        try:
+            existing_refresh_token = json.loads(decrypt(existing.oauth_encrypted)).get(
+                "refresh_token"
+            )
+        except Exception:
+            existing_refresh_token = None
+
+    oauth_blob = json.dumps(
+        {
+            "access_token": token_data["access_token"],
+            "refresh_token": token_data.get("refresh_token") or existing_refresh_token,
+            "token_uri": GOOGLE_TOKEN_URL,
+            "scopes": token_data.get(
+                "scope",
+                GOOGLE_CALENDAR_SCOPES if purpose == "calendar_oauth" else GMAIL_SCOPES,
+            ),
+            "expires_in": token_data.get("expires_in"),
+        }
     )
 
     if existing:
@@ -123,6 +158,8 @@ def gmail_oauth_callback(
         )
 
     db.commit()
+    if purpose == "calendar_oauth":
+        return RedirectResponse(url="http://localhost:3000/jobs?calendar=connected")
     return RedirectResponse(url="http://localhost:3000/settings?gmail=connected")
 
 

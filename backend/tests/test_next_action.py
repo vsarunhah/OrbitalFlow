@@ -115,6 +115,20 @@ class TestNextActionRules:
         assert action.type == "needs_reply"
         assert "replied" in action.label.lower()
 
+        msg = (
+            db_session.query(Message)
+            .filter(Message.tenant_id == tenant_id, Message.thread_id == "thread-1")
+            .order_by(Message.date_header.desc())
+            .first()
+        )
+        actions_dismissed = compute_next_actions_for_jobs(
+            db_session,
+            tenant_id,
+            [job],
+            needs_reply_dismissed_message_by_job={job.id: msg.id},
+        )
+        assert actions_dismissed[job.id] is None
+
     def test_follow_up_when_last_from_recruiter_old(
         self, client, auth_header
     ):
@@ -145,6 +159,58 @@ class TestNextActionRules:
         assert action is not None
         assert action.type == "follow_up"
         assert "follow up" in action.label.lower()
+
+        msg = (
+            db_session.query(Message)
+            .filter(Message.tenant_id == tenant_id, Message.thread_id == "thread-1")
+            .order_by(Message.date_header.desc())
+            .first()
+        )
+        out = compute_next_actions_for_jobs(
+            db_session,
+            tenant_id,
+            [job],
+            needs_reply_dismissed_message_by_job={job.id: msg.id},
+        )
+        assert out[job.id] is None
+
+    def test_dismiss_falls_through_to_ghosted(
+        self, client, auth_header
+    ):
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+
+        from tests.conftest import TestSession
+
+        db_session = TestSession()
+        old = datetime.now(timezone.utc) - timedelta(days=GHOSTED_DAYS + 1)
+        job = _make_job(
+            db_session,
+            tenant_id,
+            last_activity=old,
+            current_stage="INTERVIEW",
+        )
+        account = _make_email_account(db_session, tenant_id, email_address="me@test.com")
+        m = _make_message(
+            db_session,
+            tenant_id,
+            account.id,
+            from_address="Recruiter <recruiter@company.com>",
+            thread_id="thread-ghost",
+            days_ago=1,
+        )
+        _link_thread(db_session, tenant_id, job, "thread-ghost")
+        a1 = compute_next_actions_for_jobs(db_session, tenant_id, [job])
+        assert a1[job.id] is not None
+        assert a1[job.id].type == "needs_reply"
+        a2 = compute_next_actions_for_jobs(
+            db_session,
+            tenant_id,
+            [job],
+            needs_reply_dismissed_message_by_job={job.id: m.id},
+        )
+        assert a2[job.id] is not None
+        assert a2[job.id].type == "ghosted"
 
     def test_no_action_when_last_from_owner(
         self, client, auth_header

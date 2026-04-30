@@ -16,6 +16,7 @@ import pytest
 from app.encryption import encrypt
 from app.models.draft import MessageDraft, SentMessage
 from app.models.email_account import EmailAccount
+from app.models.message import Message
 from app.schemas.extraction import EventType
 from app.schemas.job import CONFIDENCE_THRESHOLD, JobStage
 from app.services.stage_reducer import compute_new_stage
@@ -177,6 +178,357 @@ class TestJobEndpoints:
         assert body["total"] == 1
         assert body["items"][0]["company"] == "Acme"
         assert body["items"][0]["current_stage"] == "SOURCED"
+        assert body["items"][0]["unread_incoming_count"] == 0
+
+    def test_unread_incoming_count_after_new_recruiter_message(
+        self, client, auth_header, db_session
+    ):
+        """A never-opened job with inbound is unread; opening resets; new inbound re-arms it."""
+        from datetime import datetime, timedelta, timezone
+
+        from app.models.job import JobEvent
+
+        job_id, tenant_id = _create_job_in_db(client, auth_header, db_session)
+        me = client.get("/auth/me", headers=auth_header).json()
+        user_email = me["email"]
+
+        account = EmailAccount(
+            tenant_id=tenant_id,
+            email_address=user_email,
+            provider="gmail",
+            oauth_encrypted=encrypt(json.dumps({"access_token": "x"})),
+        )
+        db_session.add(account)
+        db_session.flush()
+
+        m1 = Message(
+            tenant_id=tenant_id,
+            account_id=account.id,
+            provider_msg_id="m-unread-1",
+            raw_payload_json="{}",
+            from_address="Recruiter <recruiter@acme.com>",
+            date_header=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        db_session.add(m1)
+        db_session.flush()
+        db_session.add(
+            JobEvent(
+                tenant_id=tenant_id,
+                job_id=job_id,
+                message_id=m1.id,
+                source="extraction",
+            )
+        )
+        db_session.commit()
+
+        r = client.get("/jobs", headers=auth_header)
+        assert r.status_code == 200
+        assert r.json()["items"][0]["unread_incoming_count"] == 1
+
+        tr = client.get(f"/jobs/{job_id}/timeline", headers=auth_header)
+        assert tr.status_code == 200
+
+        after_open = client.get("/jobs", headers=auth_header).json()
+        assert after_open["items"][0]["unread_incoming_count"] == 0
+
+        future = datetime.now(timezone.utc) + timedelta(hours=2)
+        m2 = Message(
+            tenant_id=tenant_id,
+            account_id=account.id,
+            provider_msg_id="m-unread-2",
+            raw_payload_json="{}",
+            from_address="Recruiter <recruiter@acme.com>",
+            date_header=future,
+        )
+        db_session.add(m2)
+        db_session.flush()
+        db_session.add(
+            JobEvent(
+                tenant_id=tenant_id,
+                job_id=job_id,
+                message_id=m2.id,
+                source="extraction",
+            )
+        )
+        db_session.commit()
+
+        r2 = client.get("/jobs", headers=auth_header)
+        assert r2.status_code == 200
+        assert r2.json()["items"][0]["unread_incoming_count"] == 1
+
+    def test_list_jobs_unread_only(self, client, auth_header, db_session):
+        """unread_only=true returns only jobs with unread_incoming_count > 0."""
+        from datetime import datetime, timedelta, timezone
+
+        from app.models.job import Job, JobEvent
+
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+        user_email = r.json()["email"]
+
+        quiet = Job(tenant_id=tenant_id, company="Quiet", role="A", current_stage="SOURCED")
+        noisy = Job(tenant_id=tenant_id, company="Noisy", role="B", current_stage="SOURCED")
+        db_session.add_all([quiet, noisy])
+        db_session.flush()
+
+        account = EmailAccount(
+            tenant_id=tenant_id,
+            email_address=user_email,
+            provider="gmail",
+            oauth_encrypted=encrypt(json.dumps({"access_token": "x"})),
+        )
+        db_session.add(account)
+        db_session.flush()
+
+        m0 = Message(
+            tenant_id=tenant_id,
+            account_id=account.id,
+            provider_msg_id="m-quiet",
+            raw_payload_json="{}",
+            from_address="R <r@x.com>",
+            date_header=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        db_session.add(m0)
+        db_session.flush()
+        db_session.add(
+            JobEvent(
+                tenant_id=tenant_id,
+                job_id=quiet.id,
+                message_id=m0.id,
+                source="extraction",
+            )
+        )
+
+        m1 = Message(
+            tenant_id=tenant_id,
+            account_id=account.id,
+            provider_msg_id="m-noisy-1",
+            raw_payload_json="{}",
+            from_address="R <r@y.com>",
+            date_header=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        db_session.add(m1)
+        db_session.flush()
+        db_session.add(
+            JobEvent(
+                tenant_id=tenant_id,
+                job_id=noisy.id,
+                message_id=m1.id,
+                source="extraction",
+            )
+        )
+        db_session.commit()
+
+        client.get(f"/jobs/{quiet.id}/timeline", headers=auth_header)
+        client.get(f"/jobs/{noisy.id}/timeline", headers=auth_header)
+
+        future = datetime.now(timezone.utc) + timedelta(hours=3)
+        m2 = Message(
+            tenant_id=tenant_id,
+            account_id=account.id,
+            provider_msg_id="m-noisy-2",
+            raw_payload_json="{}",
+            from_address="R <r@y.com>",
+            date_header=future,
+        )
+        db_session.add(m2)
+        db_session.flush()
+        db_session.add(
+            JobEvent(
+                tenant_id=tenant_id,
+                job_id=noisy.id,
+                message_id=m2.id,
+                source="extraction",
+            )
+        )
+        db_session.commit()
+
+        resp = client.get("/jobs", params={"unread_only": True}, headers=auth_header)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        assert len(body["items"]) == 1
+        assert body["items"][0]["company"] == "Noisy"
+
+    def test_timeline_read_mark_unread_endpoint(self, client, auth_header, db_session):
+        from datetime import datetime, timedelta, timezone
+
+        from app.models.job import JobEvent
+
+        job_id, tenant_id = _create_job_in_db(client, auth_header, db_session)
+        me = client.get("/auth/me", headers=auth_header).json()
+        user_email = me["email"]
+
+        account = EmailAccount(
+            tenant_id=tenant_id,
+            email_address=user_email,
+            provider="gmail",
+            oauth_encrypted=encrypt(json.dumps({"access_token": "x"})),
+        )
+        db_session.add(account)
+        db_session.flush()
+
+        m1 = Message(
+            tenant_id=tenant_id,
+            account_id=account.id,
+            provider_msg_id="mu-1",
+            raw_payload_json="{}",
+            from_address="Recruiter <rec@acme.com>",
+            date_header=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+        db_session.add(m1)
+        db_session.flush()
+        db_session.add(
+            JobEvent(
+                tenant_id=tenant_id,
+                job_id=job_id,
+                message_id=m1.id,
+                source="extraction",
+            )
+        )
+        db_session.commit()
+
+        client.get(f"/jobs/{job_id}/timeline", headers=auth_header)
+        caught_up = client.get("/jobs", headers=auth_header).json()
+        assert caught_up["items"][0]["unread_incoming_count"] == 0
+
+        mu = client.post(
+            f"/jobs/{job_id}/timeline-read",
+            headers=auth_header,
+            json={"read": False},
+        )
+        assert mu.status_code == 200
+        assert mu.json()["unread_incoming_count"] >= 1
+
+        mr = client.post(
+            f"/jobs/{job_id}/timeline-read",
+            headers=auth_header,
+            json={"read": True},
+        )
+        assert mr.status_code == 200
+        assert mr.json()["unread_incoming_count"] == 0
+
+    def test_dismiss_needs_reply_endpoint(self, client, auth_header, db_session):
+        from datetime import datetime, timedelta, timezone
+
+        from app.models.job import JobEvent, JobThread
+
+        job_id, tenant_id = _create_job_in_db(client, auth_header, db_session)
+        me = client.get("/auth/me", headers=auth_header).json()
+        user_email = me["email"]
+
+        account = EmailAccount(
+            tenant_id=tenant_id,
+            email_address=user_email,
+            provider="gmail",
+            oauth_encrypted=encrypt(json.dumps({"access_token": "x"})),
+        )
+        db_session.add(account)
+        db_session.flush()
+        m1 = Message(
+            tenant_id=tenant_id,
+            account_id=account.id,
+            provider_msg_id="dismiss-nr-1",
+            raw_payload_json="{}",
+            from_address="Recruiter <recruiter@acme.com>",
+            date_header=datetime.now(timezone.utc) - timedelta(hours=1),
+            thread_id="dismiss-t1",
+        )
+        db_session.add(m1)
+        db_session.flush()
+        db_session.add(
+            JobEvent(
+                tenant_id=tenant_id,
+                job_id=job_id,
+                message_id=m1.id,
+                source="extraction",
+            )
+        )
+        db_session.add(
+            JobThread(tenant_id=tenant_id, job_id=job_id, thread_id="dismiss-t1")
+        )
+        db_session.commit()
+
+        det = client.get(f"/jobs/{job_id}", headers=auth_header)
+        assert det.status_code == 200
+        assert det.json()["next_action"] is not None
+        dis = client.post(
+            f"/jobs/{job_id}/dismiss-needs-reply",
+            headers=auth_header,
+        )
+        assert dis.status_code == 200
+        assert dis.json()["next_action"] is None
+
+    def test_dismiss_needs_reply_400_when_no_inbound(
+        self, client, auth_header, db_session
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from app.models.job import JobEvent, JobThread
+
+        job_id, tenant_id = _create_job_in_db(client, auth_header, db_session)
+        me = client.get("/auth/me", headers=auth_header).json()
+        user_email = me["email"]
+        account = EmailAccount(
+            tenant_id=tenant_id,
+            email_address=user_email,
+            provider="gmail",
+            oauth_encrypted=encrypt(json.dumps({"access_token": "x"})),
+        )
+        db_session.add(account)
+        db_session.flush()
+        m1 = Message(
+            tenant_id=tenant_id,
+            account_id=account.id,
+            provider_msg_id="dismiss-nr-2",
+            raw_payload_json="{}",
+            from_address=f"Me <{user_email}>",
+            date_header=datetime.now(timezone.utc) - timedelta(hours=1),
+            thread_id="dismiss-t2",
+        )
+        db_session.add(m1)
+        db_session.flush()
+        db_session.add(
+            JobEvent(
+                tenant_id=tenant_id,
+                job_id=job_id,
+                message_id=m1.id,
+                source="extraction",
+            )
+        )
+        db_session.add(
+            JobThread(tenant_id=tenant_id, job_id=job_id, thread_id="dismiss-t2")
+        )
+        db_session.commit()
+
+        dis = client.post(
+            f"/jobs/{job_id}/dismiss-needs-reply",
+            headers=auth_header,
+        )
+        assert dis.status_code == 400
+
+    def test_list_jobs_sorted_by_updated_at_desc(self, client, auth_header, db_session):
+        """Job list defaults to most recently updated job rows (cheap indexed sort)."""
+        from datetime import datetime, timedelta, timezone
+
+        from app.models.job import Job as JobRow
+
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+
+        older = JobRow(tenant_id=tenant_id, company="Older", role="A", current_stage="SOURCED")
+        newer = JobRow(tenant_id=tenant_id, company="Newer", role="B", current_stage="SOURCED")
+        db_session.add_all([older, newer])
+        db_session.flush()
+
+        now = datetime.now(timezone.utc)
+        older.updated_at = now - timedelta(days=2)
+        newer.updated_at = now - timedelta(days=1)
+        db_session.commit()
+
+        r = client.get("/jobs", headers=auth_header)
+        assert r.status_code == 200
+        assert [j["company"] for j in r.json()["items"]] == ["Newer", "Older"]
 
     def test_get_job_detail(self, client, auth_header, db_session):
         job_id, _ = _create_job_in_db(client, auth_header, db_session)
@@ -410,6 +762,164 @@ class TestManualOverride:
         assert len(sent_for_target) == 1
         assert sent_for_target[0].subject == "Re: Follow up"
         assert len(sent_for_source) == 0
+
+    def test_merge_jobs_repoints_manual_change_history(
+        self, client, auth_header, db_session
+    ):
+        """Merge moves job_manual_changes from source to target so delete succeeds."""
+        from app.models.job import JobManualChange
+
+        target_id, tenant_id = _create_job_in_db(
+            client, auth_header, db_session, company="Acme", role="SWE"
+        )
+        source_id, _ = _create_job_in_db(
+            client, auth_header, db_session, company="Acme", role="Software Engineer"
+        )
+
+        r = client.get("/auth/me", headers=auth_header)
+        user_id = uuid.UUID(r.json()["user_id"])
+
+        entry = JobManualChange(
+            tenant_id=tenant_id,
+            job_id=source_id,
+            user_id=user_id,
+            stage_before="APPLIED",
+            stage_after="INTERVIEW",
+            reason="User corrected pipeline",
+        )
+        db_session.add(entry)
+        db_session.commit()
+
+        merge_resp = client.post(
+            "/jobs/merge",
+            headers=auth_header,
+            json={
+                "target_job_id": str(target_id),
+                "source_job_ids": [str(source_id)],
+            },
+        )
+        assert merge_resp.status_code == 200
+        assert merge_resp.json()["status"] == "merged"
+
+        db_session.expire_all()
+        for_source = db_session.query(JobManualChange).filter(
+            JobManualChange.job_id == source_id
+        ).all()
+        for_target = db_session.query(JobManualChange).filter(
+            JobManualChange.job_id == target_id
+        ).all()
+
+        assert len(for_source) == 0
+        assert len(for_target) == 1
+        assert for_target[0].reason == "User corrected pipeline"
+        assert for_target[0].stage_before == "APPLIED"
+        assert for_target[0].stage_after == "INTERVIEW"
+
+    def test_merge_takes_min_last_seen_and_none_dominates(
+        self, client, auth_header, db_session
+    ):
+        """Merging must preserve unread: per user take min(last_seen_at); a never-opened side wins."""
+        from datetime import datetime, timedelta, timezone
+
+        from app.models.job import JobTimelineReadState
+
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+        user_id = uuid.UUID(r.json()["user_id"])
+
+        # --- Case 1: both opened. Target row should end up at the earlier of the two. ---
+        target_a, _ = _create_job_in_db(
+            client, auth_header, db_session, company="A", role="t"
+        )
+        source_a, _ = _create_job_in_db(
+            client, auth_header, db_session, company="A", role="s"
+        )
+        earlier = datetime.now(timezone.utc) - timedelta(days=2)
+        later = datetime.now(timezone.utc) - timedelta(hours=1)
+        db_session.add(
+            JobTimelineReadState(
+                tenant_id=tenant_id, user_id=user_id, job_id=source_a, last_seen_at=earlier
+            )
+        )
+        db_session.add(
+            JobTimelineReadState(
+                tenant_id=tenant_id, user_id=user_id, job_id=target_a, last_seen_at=later
+            )
+        )
+        db_session.commit()
+
+        resp_a = client.post(
+            "/jobs/merge",
+            headers=auth_header,
+            json={"target_job_id": str(target_a), "source_job_ids": [str(source_a)]},
+        )
+        assert resp_a.status_code == 200
+
+        db_session.expire_all()
+        rows_a = db_session.query(JobTimelineReadState).filter(
+            JobTimelineReadState.job_id == target_a
+        ).all()
+        assert len(rows_a) == 1
+        got_a = rows_a[0].last_seen_at
+        if got_a.tzinfo is None:
+            got_a = got_a.replace(tzinfo=timezone.utc)
+        assert abs((got_a - earlier).total_seconds()) < 1
+
+        # --- Case 2: only target opened. Result must be "never opened" (row deleted). ---
+        target_b, _ = _create_job_in_db(
+            client, auth_header, db_session, company="B", role="t"
+        )
+        source_b, _ = _create_job_in_db(
+            client, auth_header, db_session, company="B", role="s"
+        )
+        db_session.add(
+            JobTimelineReadState(
+                tenant_id=tenant_id, user_id=user_id, job_id=target_b,
+                last_seen_at=datetime.now(timezone.utc),
+            )
+        )
+        db_session.commit()
+
+        resp_b = client.post(
+            "/jobs/merge",
+            headers=auth_header,
+            json={"target_job_id": str(target_b), "source_job_ids": [str(source_b)]},
+        )
+        assert resp_b.status_code == 200
+
+        db_session.expire_all()
+        rows_b = db_session.query(JobTimelineReadState).filter(
+            JobTimelineReadState.job_id == target_b
+        ).all()
+        assert rows_b == []
+
+        # --- Case 3: only source opened. Cascade drops source's row; target stays row-less. ---
+        target_c, _ = _create_job_in_db(
+            client, auth_header, db_session, company="C", role="t"
+        )
+        source_c, _ = _create_job_in_db(
+            client, auth_header, db_session, company="C", role="s"
+        )
+        db_session.add(
+            JobTimelineReadState(
+                tenant_id=tenant_id, user_id=user_id, job_id=source_c,
+                last_seen_at=datetime.now(timezone.utc),
+            )
+        )
+        db_session.commit()
+
+        resp_c = client.post(
+            "/jobs/merge",
+            headers=auth_header,
+            json={"target_job_id": str(target_c), "source_job_ids": [str(source_c)]},
+        )
+        assert resp_c.status_code == 200
+
+        db_session.expire_all()
+        rows_c = db_session.query(JobTimelineReadState).filter(
+            JobTimelineReadState.job_id == target_c
+        ).all()
+        assert rows_c == []
 
 
 class TestJobContactDeduplication:

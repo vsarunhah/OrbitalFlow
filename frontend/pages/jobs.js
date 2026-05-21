@@ -25,6 +25,7 @@ import JobHeader from "../components/jobs/JobHeader";
 import Thread from "../components/jobs/Thread";
 import ReplyDrawer from "../components/jobs/ReplyDrawer";
 import MergeJobsDialog from "../components/jobs/MergeJobsDialog";
+import SuggestMergesDialog from "../components/jobs/SuggestMergesDialog";
 import ShortcutsDialog from "../components/jobs/ShortcutsDialog";
 import useKeyboardShortcuts from "../components/jobs/useKeyboardShortcuts";
 import {
@@ -33,6 +34,7 @@ import {
   firstQueryValue,
   buildJobsListQuery,
 } from "../components/jobs/stages";
+import { groupJobsByNormalizedCompany } from "../lib/jobMergeSuggest";
 
 /** Server caps at 200; we fetch the top chunk so "all" is close to all. */
 const JOB_LIST_LIMIT = 200;
@@ -99,6 +101,8 @@ export default function JobsPage() {
   const [replyDraft, setReplyDraft] = useState(null);
   const [generatingFollowUp, setGeneratingFollowUp] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [suggestMergesOpen, setSuggestMergesOpen] = useState(false);
+  const [suggestMergeGroups, setSuggestMergeGroups] = useState([]);
 
   const visibleJobs = useMemo(() => {
     const filteredByView = applyViewFilter(jobs, view);
@@ -387,6 +391,21 @@ export default function JobsPage() {
     });
   }, []);
 
+  const openSuggestMerges = useCallback(() => {
+    setSuggestMergeGroups(groupJobsByNormalizedCompany(jobs));
+    setSuggestMergesOpen(true);
+  }, [jobs]);
+
+  const handleSelectSuggestedMergeGroup = useCallback((groupJobs) => {
+    if (!groupJobs?.length) return;
+    setSuggestMergesOpen(false);
+    setMergeMode(true);
+    setMergeSelectedIds(new Set(groupJobs.map((j) => j.id)));
+    const firstId = groupJobs[0].id;
+    setSelectedJobId(firstId);
+    scrollJobListItemIntoView(firstId);
+  }, []);
+
   const handleMergeConfirm = useCallback(
     async (targetId, sourceIds) => {
       if (sourceIds.length === 0) return;
@@ -431,7 +450,12 @@ export default function JobsPage() {
   );
 
   useKeyboardShortcuts({
-    enabled: !replyOpen && !deleteConfirmJob && !showMergeModal && !shortcutsOpen,
+    enabled:
+      !replyOpen &&
+      !deleteConfirmJob &&
+      !showMergeModal &&
+      !shortcutsOpen &&
+      !suggestMergesOpen,
     onFocusSearch: () => searchInputRef.current?.focus(),
     onNext: () => moveSelection(1),
     onPrev: () => moveSelection(-1),
@@ -565,6 +589,7 @@ export default function JobsPage() {
             compact={compact}
             onCompactChange={setCompact}
             onEnterMergeMode={() => setMergeMode(true)}
+            onSuggestMerges={openSuggestMerges}
             onShowShortcuts={() => setShortcutsOpen(true)}
           />
 
@@ -677,6 +702,14 @@ export default function JobsPage() {
           ) : null}
         </Box>
       </Box>
+
+      {suggestMergesOpen ? (
+        <SuggestMergesDialog
+          groups={suggestMergeGroups}
+          onClose={() => setSuggestMergesOpen(false)}
+          onSelectGroup={handleSelectSuggestedMergeGroup}
+        />
+      ) : null}
 
       {showMergeModal ? (
         <MergeJobsDialog

@@ -15,6 +15,7 @@ import SearchIcon from "@mui/icons-material/Search";
 import CloseIcon from "@mui/icons-material/Close";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import MergeTypeIcon from "@mui/icons-material/MergeType";
+import TipsAndUpdatesIcon from "@mui/icons-material/TipsAndUpdates";
 import KeyboardIcon from "@mui/icons-material/Keyboard";
 import ViewAgendaIcon from "@mui/icons-material/ViewAgenda";
 import ViewDayIcon from "@mui/icons-material/ViewDay";
@@ -37,6 +38,7 @@ export default function JobListToolbar({
   compact,
   onCompactChange,
   onEnterMergeMode,
+  onSuggestMerges,
   onShowShortcuts,
 }) {
   const [menuAnchor, setMenuAnchor] = useState(null);
@@ -94,6 +96,15 @@ export default function JobListToolbar({
             <Checkbox checked={compact} size="small" sx={{ mr: 1, p: 0 }} />
             {compact ? <ViewDayIcon fontSize="small" sx={{ mr: 1 }} /> : <ViewAgendaIcon fontSize="small" sx={{ mr: 1 }} />}
             <ListItemText primary="Compact list" />
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              setMenuAnchor(null);
+              onSuggestMerges?.();
+            }}
+          >
+            <TipsAndUpdatesIcon fontSize="small" sx={{ mr: 1 }} />
+            <ListItemText primary="Suggest merges…" />
           </MenuItem>
           <MenuItem
             onClick={() => {

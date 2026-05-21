@@ -16,3 +16,4 @@ cryptography
 pytest
 pdfplumber
 reportlab
+mistune

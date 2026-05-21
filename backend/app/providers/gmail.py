@@ -243,6 +243,17 @@ def verify_gmail_connection(
     return True, None
 
 
+# System labels that mean the message should not drive job tracking.
+_SKIP_INGEST_LABELS = frozenset({"DRAFT", "TRASH", "SPAM"})
+
+
+def should_skip_ingest(label_ids: list[str] | None) -> bool:
+    """True when Gmail labels indicate draft, spam, or trash."""
+    if not label_ids:
+        return False
+    return bool(_SKIP_INGEST_LABELS.intersection(label_ids))
+
+
 def _parse_message(raw: dict) -> FetchedMessage:
     """Parse a Gmail API messages.get(format=full) response."""
     payload = raw.get("payload", {})

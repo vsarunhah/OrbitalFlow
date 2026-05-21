@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
@@ -7,136 +7,50 @@ import Alert from "@mui/material/Alert";
 import Paper from "@mui/material/Paper";
 import IconButton from "@mui/material/IconButton";
 import Drawer from "@mui/material/Drawer";
+import Dialog from "@mui/material/Dialog";
+import DialogTitle from "@mui/material/DialogTitle";
+import DialogContent from "@mui/material/DialogContent";
+import DialogActions from "@mui/material/DialogActions";
 import List from "@mui/material/List";
 import ListItem from "@mui/material/ListItem";
 import CircularProgress from "@mui/material/CircularProgress";
+import ToggleButton from "@mui/material/ToggleButton";
+import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
+import Tooltip from "@mui/material/Tooltip";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import DownloadIcon from "@mui/icons-material/Download";
 import RateReviewIcon from "@mui/icons-material/RateReview";
 import SaveIcon from "@mui/icons-material/Save";
-import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
-import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
+import PreviewOutlinedIcon from "@mui/icons-material/PreviewOutlined";
+import OpenInFullIcon from "@mui/icons-material/OpenInFull";
+import CloseIcon from "@mui/icons-material/Close";
+import { alpha } from "@mui/material/styles";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   fetchResumes,
   fetchResume,
-  uploadResume,
+  createResume,
   updateResume,
   deleteResume,
   reviewResume,
   exportResumePdf,
 } from "../lib/api";
+import {
+  ensureParsedShape,
+  formFromApi,
+  generateId,
+  getDefaultForm,
+  markdownPayloadFromApi,
+  structuredToMarkdown,
+  toStoredJson,
+} from "../lib/resumeStructured";
+import ResumeFormEditor from "../components/ResumeFormEditor";
 import ConfirmModal from "../components/ConfirmModal";
 
-function generateId() {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
-
-const defaultParsed = () => ({
-  contact: { name: "", email: "", phone: "" },
-  sections: [],
-});
-
-function ensureParsedShape(parsed) {
-  if (!parsed || typeof parsed !== "object") return defaultParsed();
-  if (parsed.sections && Array.isArray(parsed.sections)) {
-    const contact = parsed.contact && typeof parsed.contact === "object"
-      ? {
-          name: parsed.contact.name ?? "",
-          email: parsed.contact.email ?? "",
-          phone: parsed.contact.phone ?? "",
-        }
-      : {
-          name: parsed.name ?? "",
-          email: parsed.email ?? "",
-          phone: parsed.phone ?? "",
-        };
-    const sections = parsed.sections.map((s, i) => ({
-      id: s.id || generateId(),
-      name: s.name ?? "Section",
-      order: typeof s.order === "number" ? s.order : i,
-      content_type: s.content_type === "list" ? "list" : "text",
-      text: s.content_type === "text" ? (s.text ?? "") : "",
-      items: (s.content_type === "list" && Array.isArray(s.items))
-        ? s.items.map((it) => ({
-            heading: it?.heading ?? "",
-            subheading: it?.subheading ?? "",
-            body: it?.body ?? "",
-          }))
-        : [],
-    }));
-    sections.sort((a, b) => a.order - b.order);
-    sections.forEach((s, i) => {
-      s.order = i;
-    });
-    return { contact, sections };
-  }
-  const contact = {
-    name: parsed.name ?? "",
-    email: parsed.email ?? "",
-    phone: parsed.phone ?? "",
-  };
-  const sections = [];
-  let order = 0;
-  if (parsed.summary) {
-    sections.push({
-      id: "summary",
-      name: "Summary",
-      order: order++,
-      content_type: "text",
-      text: parsed.summary,
-      items: [],
-    });
-  }
-  const exp = parsed.experience || [];
-  if (exp.length) {
-    sections.push({
-      id: "experience",
-      name: "Experience",
-      order: order++,
-      content_type: "list",
-      text: null,
-      items: exp.map((e) => ({
-        heading: e?.title ?? "",
-        subheading: [e?.company, e?.dates].filter(Boolean).join(" — "),
-        body: e?.description ?? "",
-      })),
-    });
-  }
-  const edu = parsed.education || [];
-  if (edu.length) {
-    sections.push({
-      id: "education",
-      name: "Education",
-      order: order++,
-      content_type: "list",
-      text: null,
-      items: edu.map((e) => ({
-        heading: e?.degree ?? "",
-        subheading: [e?.institution, e?.dates].filter(Boolean).join(" — "),
-        body: "",
-      })),
-    });
-  }
-  const sk = parsed.skills;
-  if (sk && (Array.isArray(sk) ? sk.length : sk)) {
-    sections.push({
-      id: "skills",
-      name: "Skills",
-      order: order++,
-      content_type: "list",
-      text: null,
-      items: (Array.isArray(sk) ? sk : [sk]).map((s) => ({ heading: "", subheading: "", body: String(s) })),
-    });
-  }
-  sections.forEach((s, i) => {
-    s.order = i;
-  });
-  return { contact, sections };
-}
-
-function ResumeListItemCard({ resume, onOpen, onDelete }) {
+function ResumeListItemCard({ resume, onOpen, onDelete, onPreview }) {
   const updated = resume.updated_at
     ? new Date(resume.updated_at).toLocaleDateString(undefined, {
         month: "short",
@@ -163,16 +77,20 @@ function ResumeListItemCard({ resume, onOpen, onDelete }) {
           Updated {updated}
         </Typography>
       </Box>
-      <IconButton
-        size="small"
-        aria-label="Delete"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete(resume);
-        }}
-      >
-        <DeleteOutlineIcon fontSize="small" />
-      </IconButton>
+      <Box sx={{ display: "flex", alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
+        {onPreview && (
+          <Tooltip title="Preview">
+            <IconButton size="small" aria-label="Preview resume" onClick={() => onPreview(resume)}>
+              <PreviewOutlinedIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
+        <Tooltip title="Delete">
+          <IconButton size="small" aria-label="Delete" onClick={() => onDelete(resume)}>
+            <DeleteOutlineIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Box>
     </Paper>
   );
 }
@@ -242,6 +160,142 @@ function SuggestionsDrawer({ open, onClose, suggestions, onApply }) {
   );
 }
 
+const previewSx = {
+  fontFamily: '"Helvetica Neue", Helvetica, Arial, sans-serif',
+  fontSize: "11pt",
+  lineHeight: 1.23,
+  color: "text.primary",
+  maxWidth: "7.5in",
+  mx: "auto",
+  "& h1": {
+    fontSize: "16pt",
+    fontWeight: 700,
+    lineHeight: 1.2,
+    mt: 0,
+    mb: 1,
+    pb: 0.5,
+    borderBottom: 2,
+    borderColor: "primary.main",
+  },
+  "& h2": { fontSize: "12pt", fontWeight: 700, color: "primary.main", mt: 2, mb: 0.75, lineHeight: 1.2 },
+  "& h3": { fontSize: "11pt", fontWeight: 700, mt: 1.5, mb: 0.5, lineHeight: 1.2 },
+  "& p": { my: 0.75, lineHeight: 1.23, fontSize: "11pt" },
+  "& ul": { my: 0.75, pl: 2.5, fontSize: "10pt" },
+  "& ol": { my: 0.75, pl: 2.5, fontSize: "10pt" },
+  "& li": { mb: 0.35, lineHeight: 1.15 },
+  "& a": { color: "primary.main" },
+  "& table": { borderCollapse: "collapse", width: "100%", my: 1, fontSize: "11pt" },
+  "& th, & td": { border: 1, borderColor: "divider", px: 1, py: 0.5 },
+  "& th": { bgcolor: "action.hover" },
+  "& code": {
+    fontFamily: "ui-monospace, 'Courier New', monospace",
+    fontSize: "9pt",
+    bgcolor: "action.hover",
+    px: 0.5,
+    borderRadius: 0.5,
+  },
+};
+
+/** Matches backend PDF: US Letter (11in) with 0.4in top and bottom margin (see resume_pdf.MARGIN). */
+const PDF_PAGE_BODY_HEIGHT = "10.2in";
+
+function MarkdownPreview({
+  markdown,
+  emptyFallback = "*Nothing to preview*",
+  showPageGuides = true,
+}) {
+  const mdContent = markdown?.trim() ? markdown : emptyFallback;
+  const inner = (
+    <Box sx={previewSx}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{mdContent}</ReactMarkdown>
+    </Box>
+  );
+  if (!showPageGuides) return inner;
+  return (
+    <Box sx={{ position: "relative" }}>
+      <Box sx={{ position: "relative", zIndex: 1 }}>{inner}</Box>
+      <Box
+        aria-hidden
+        sx={(theme) => ({
+          position: "absolute",
+          inset: 0,
+          zIndex: 0,
+          pointerEvents: "none",
+          backgroundImage: `repeating-linear-gradient(
+            to bottom,
+            transparent 0,
+            transparent calc(${PDF_PAGE_BODY_HEIGHT} - 3px),
+            ${alpha(theme.palette.primary.main, 0.5)} calc(${PDF_PAGE_BODY_HEIGHT} - 3px),
+            ${alpha(theme.palette.primary.main, 0.5)} calc(${PDF_PAGE_BODY_HEIGHT} - 1px),
+            transparent calc(${PDF_PAGE_BODY_HEIGHT} - 1px),
+            transparent ${PDF_PAGE_BODY_HEIGHT}
+          )`,
+        })}
+      />
+    </Box>
+  );
+}
+
+function ResumePreviewDialog({
+  open,
+  title,
+  markdown,
+  loading,
+  onClose,
+  footer,
+  onDownloadPdf,
+  downloadLoading = false,
+}) {
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth scroll="paper">
+      <DialogTitle
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 1,
+          pr: 1,
+          flexWrap: "wrap",
+        }}
+      >
+        <Typography component="span" variant="h6" sx={{ fontSize: "1.1rem", flex: "1 1 auto", minWidth: 0 }}>
+          {title}
+        </Typography>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, ml: "auto" }}>
+          {onDownloadPdf && (
+            <Tooltip title="PDF is generated from the saved resume on the server. Save first if you have unsaved changes.">
+              <span>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={downloadLoading ? <CircularProgress size={16} /> : <DownloadIcon />}
+                  disabled={downloadLoading || loading}
+                  onClick={onDownloadPdf}
+                >
+                  Download PDF
+                </Button>
+              </span>
+            </Tooltip>
+          )}
+          <IconButton aria-label="Close preview" onClick={onClose} size="small">
+            <CloseIcon />
+          </IconButton>
+        </Box>
+      </DialogTitle>
+      <DialogContent dividers sx={{ minHeight: 280 }}>
+        {loading ? (
+          <Box sx={{ display: "flex", justifyContent: "center", py: 6 }}>
+            <CircularProgress />
+          </Box>
+        ) : (
+          <MarkdownPreview markdown={markdown} />
+        )}
+      </DialogContent>
+      {footer}
+    </Dialog>
+  );
+}
+
 export default function ResumesPage() {
   const [resumes, setResumes] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -249,14 +303,20 @@ export default function ResumesPage() {
   const [selectedId, setSelectedId] = useState(null);
   const [resume, setResume] = useState(null);
   const [editingName, setEditingName] = useState("");
-  const [editingParsed, setEditingParsed] = useState(defaultParsed());
+  const [editingForm, setEditingForm] = useState(() => getDefaultForm());
   const [saveLoading, setSaveLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [editorLayout, setEditorLayout] = useState("split");
+  const [listPreview, setListPreview] = useState(null);
+  const [editPreviewOpen, setEditPreviewOpen] = useState(false);
+  const [listExportLoading, setListExportLoading] = useState(false);
+
+  const derivedMarkdown = useMemo(() => structuredToMarkdown(editingForm), [editingForm]);
 
   const loadList = useCallback(async () => {
     setError(null);
@@ -282,7 +342,9 @@ export default function ResumesPage() {
       const r = await fetchResume(id);
       setResume(r);
       setEditingName(r.name || "");
-      setEditingParsed(ensureParsedShape(r.parsed_json));
+      setEditingForm(formFromApi(r.parsed_json));
+      setEditorLayout("split");
+      setEditPreviewOpen(false);
     } catch (e) {
       setError(e.message);
     }
@@ -293,6 +355,8 @@ export default function ResumesPage() {
     setResume(null);
     setSuggestions([]);
     setSuggestionsOpen(false);
+    setEditPreviewOpen(false);
+    setListPreview(null);
     loadList();
   }, [loadList]);
 
@@ -303,30 +367,34 @@ export default function ResumesPage() {
     try {
       const updated = await updateResume(selectedId, {
         name: editingName,
-        parsed_json: editingParsed,
+        parsed_json: toStoredJson(editingForm),
       });
       setResume(updated);
+      setEditingForm(formFromApi(updated.parsed_json));
     } catch (e) {
       setError(e.message);
     } finally {
       setSaveLoading(false);
     }
-  }, [selectedId, editingName, editingParsed]);
+  }, [selectedId, editingName, editingForm]);
 
-  const handleUpload = useCallback(async (e) => {
-    const file = e.target?.files?.[0];
-    if (!file) return;
+  const handleNew = useCallback(async () => {
     setError(null);
-    setUploading(true);
+    setCreating(true);
     try {
-      const created = await uploadResume(file);
+      const form = getDefaultForm();
+      const md = structuredToMarkdown(form);
+      const created = await createResume({
+        name: "Untitled resume",
+        markdown: md,
+        sourceForm: form,
+      });
       setResumes((prev) => [created, ...prev]);
-      handleOpen(created.id);
+      await handleOpen(created.id);
     } catch (e) {
       setError(e.message);
     } finally {
-      setUploading(false);
-      e.target.value = "";
+      setCreating(false);
     }
   }, [handleOpen]);
 
@@ -348,9 +416,14 @@ export default function ResumesPage() {
   const applySuggestion = useCallback((s) => {
     if (!s.suggested_value) return;
     const ref = (s.section || "").trim();
-    setEditingParsed((prev) => {
-      const next = JSON.parse(JSON.stringify(prev));
-      const contactMatch = ref.toLowerCase();
+    const refLower = ref.toLowerCase();
+    if (refLower === "markdown" || refLower.startsWith("markdown")) {
+      setEditingForm(formFromApi({ format: "markdown", markdown: String(s.suggested_value) }));
+      return;
+    }
+    setEditingForm((prev) => {
+      const next = JSON.parse(JSON.stringify(ensureParsedShape(prev)));
+      const contactMatch = refLower;
       if (contactMatch === "name") {
         next.contact = next.contact || {};
         next.contact.name = s.suggested_value;
@@ -366,6 +439,16 @@ export default function ResumesPage() {
         next.contact.phone = s.suggested_value;
         return next;
       }
+      if (contactMatch === "linkedin") {
+        next.contact = next.contact || {};
+        next.contact.linkedin = s.suggested_value;
+        return next;
+      }
+      if (contactMatch === "websites" || contactMatch === "website") {
+        next.contact = next.contact || {};
+        next.contact.websites = s.suggested_value;
+        return next;
+      }
       const secIndexMatch = ref.match(/sections\[(\d+)\](?:\.items\[(\d+)\])?(?:\.(body|heading|subheading))?/);
       if (secIndexMatch) {
         const si = parseInt(secIndexMatch[1], 10);
@@ -378,28 +461,40 @@ export default function ResumesPage() {
           if (itemIndex < sec.items.length) {
             sec.items[itemIndex][field] = s.suggested_value;
           }
-        } else {
-          if (field === "text") sec.text = s.suggested_value;
+        } else if (field === "text") {
+          sec.text = s.suggested_value;
         }
         return next;
       }
       const byName = next.sections.find(
-        (sec) => sec.name && sec.name.toLowerCase() === ref.toLowerCase()
+        (sec) => sec.name && sec.name.toLowerCase() === refLower,
       );
       if (byName) {
         if (byName.content_type === "text") byName.text = s.suggested_value;
         return next;
       }
-      if (ref.toLowerCase() === "summary") {
+      if (refLower === "summary") {
         const sum = next.sections.find((sec) => sec.name && sec.name.toLowerCase() === "summary");
         if (sum) sum.text = s.suggested_value;
-        else next.sections.push({ id: generateId(), name: "Summary", order: next.sections.length, content_type: "text", text: s.suggested_value, items: [] });
+        else {
+          next.sections.push({
+            id: generateId(),
+            name: "Summary",
+            order: next.sections.length,
+            content_type: "text",
+            text: s.suggested_value,
+            items: [],
+          });
+        }
         return next;
       }
-      if (ref.toLowerCase().includes("skills")) {
+      if (refLower.includes("skills")) {
         const sk = next.sections.find((sec) => sec.name && sec.name.toLowerCase() === "skills");
         if (sk) {
-          sk.items = s.suggested_value.split(/[,;\n]+/).map((x) => ({ heading: "", subheading: "", body: x.trim() })).filter((x) => x.body);
+          sk.items = s.suggested_value
+            .split(/[,;\n]+/)
+            .map((x) => ({ heading: "", subheading: "", body: x.trim() }))
+            .filter((x) => x.body);
         }
         return next;
       }
@@ -420,6 +515,36 @@ export default function ResumesPage() {
     }
   }, [selectedId]);
 
+  const handleListPreviewExport = useCallback(async () => {
+    const id = listPreview?.id;
+    if (!id) return;
+    setListExportLoading(true);
+    setError(null);
+    try {
+      await exportResumePdf(id);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setListExportLoading(false);
+    }
+  }, [listPreview?.id]);
+
+  const openListPreview = useCallback(async (r) => {
+    setListPreview({ id: r.id, title: r.name, markdown: "", loading: true });
+    try {
+      const full = await fetchResume(r.id);
+      setListPreview({
+        id: r.id,
+        title: full.name || r.name,
+        markdown: markdownPayloadFromApi(full.parsed_json),
+        loading: false,
+      });
+    } catch (e) {
+      setError(e.message);
+      setListPreview(null);
+    }
+  }, []);
+
   const handleDeleteConfirm = useCallback(async () => {
     if (!deleteTarget) return;
     try {
@@ -433,206 +558,9 @@ export default function ResumesPage() {
     }
   }, [deleteTarget, selectedId, handleBack, loadList]);
 
-  const updateContact = (field, value) => {
-    setEditingParsed((prev) => ({
-      ...prev,
-      contact: { ...(prev.contact || {}), [field]: value },
-    }));
-  };
-
-  const updateSection = (sectionIndex, updates) => {
-    setEditingParsed((prev) => {
-      const sections = [...(prev.sections || [])];
-      sections[sectionIndex] = { ...sections[sectionIndex], ...updates };
-      return { ...prev, sections };
-    });
-  };
-
-  const updateSectionItem = (sectionIndex, itemIndex, field, value) => {
-    setEditingParsed((prev) => {
-      const sections = [...(prev.sections || [])];
-      const sec = { ...sections[sectionIndex], items: [...(sections[sectionIndex].items || [])] };
-      sec.items[itemIndex] = { ...sec.items[itemIndex], [field]: value };
-      sections[sectionIndex] = sec;
-      return { ...prev, sections };
-    });
-  };
-
-  const moveSection = (fromIndex, direction) => {
-    const toIndex = direction === "up" ? fromIndex - 1 : fromIndex + 1;
-    if (toIndex < 0 || toIndex >= (editingParsed.sections || []).length) return;
-    setEditingParsed((prev) => {
-      const sections = [...prev.sections];
-      [sections[fromIndex], sections[toIndex]] = [sections[toIndex], sections[fromIndex]];
-      sections.forEach((s, i) => {
-        s.order = i;
-      });
-      return { ...prev, sections };
-    });
-  };
-
-  const addSection = () => {
-    setEditingParsed((prev) => ({
-      ...prev,
-      sections: [
-        ...(prev.sections || []),
-        { id: generateId(), name: "New Section", order: (prev.sections || []).length, content_type: "text", text: "", items: [] },
-      ],
-    }));
-  };
-
-  const removeSection = (index) => {
-    setEditingParsed((prev) => {
-      const sections = (prev.sections || []).filter((_, i) => i !== index);
-      sections.forEach((s, i) => {
-        s.order = i;
-      });
-      return { ...prev, sections };
-    });
-  };
-
-  const addSectionItem = (sectionIndex) => {
-    setEditingParsed((prev) => {
-      const sections = [...(prev.sections || [])];
-      const sec = { ...sections[sectionIndex], items: [...(sections[sectionIndex].items || []), { heading: "", subheading: "", body: "" }] };
-      sections[sectionIndex] = sec;
-      return { ...prev, sections };
-    });
-  };
-
-  const removeSectionItem = (sectionIndex, itemIndex) => {
-    setEditingParsed((prev) => {
-      const sections = [...(prev.sections || [])];
-      const sec = { ...sections[sectionIndex], items: (sections[sectionIndex].items || []).filter((_, i) => i !== itemIndex) };
-      sections[sectionIndex] = sec;
-      return { ...prev, sections };
-    });
-  };
-
-  /** Body as newline-separated bullets → array (empty body → one empty string for one textbox). */
-  const getBullets = (body) => {
-    if (body == null || body === "") return [""];
-    const lines = String(body).split(/\n/).map((l) => l.trim());
-    return lines.length ? lines : [""];
-  };
-
-  const updateSectionItemBullet = (sectionIndex, itemIndex, bulletIndex, value) => {
-    setEditingParsed((prev) => {
-      const sections = [...(prev.sections || [])];
-      const sec = sections[sectionIndex];
-      const items = [...(sec.items || [])];
-      const item = { ...items[itemIndex] };
-      const bullets = getBullets(item.body);
-      const next = [...bullets];
-      if (bulletIndex >= next.length) next.length = bulletIndex + 1;
-      next[bulletIndex] = value;
-      item.body = next.join("\n");
-      items[itemIndex] = item;
-      sections[sectionIndex] = { ...sec, items };
-      return { ...prev, sections };
-    });
-  };
-
-  const addSectionItemBullet = (sectionIndex, itemIndex) => {
-    setEditingParsed((prev) => {
-      const sections = [...(prev.sections || [])];
-      const sec = sections[sectionIndex];
-      const items = [...(sec.items || [])];
-      const item = { ...items[itemIndex] };
-      const bullets = getBullets(item.body);
-      item.body = [...bullets, ""].join("\n");
-      items[itemIndex] = item;
-      sections[sectionIndex] = { ...sec, items };
-      return { ...prev, sections };
-    });
-  };
-
-  const removeSectionItemBullet = (sectionIndex, itemIndex, bulletIndex) => {
-    setEditingParsed((prev) => {
-      const sections = [...(prev.sections || [])];
-      const sec = sections[sectionIndex];
-      const items = [...(sec.items || [])];
-      const item = { ...items[itemIndex] };
-      const bullets = getBullets(item.body).filter((_, i) => i !== bulletIndex);
-      item.body = bullets.join("\n");
-      items[itemIndex] = item;
-      sections[sectionIndex] = { ...sec, items };
-      return { ...prev, sections };
-    });
-  };
-
-  const parseExperienceMeta = (subheading) => {
-    if (!subheading) {
-      return { company: "", location: "", startDate: "", endDate: "" };
-    }
-    const parts = String(subheading).split("|").map((p) => p.trim()).filter(Boolean);
-    const company = parts[0] || "";
-    let location = "";
-    let datePart = "";
-    if (parts.length >= 3) {
-      location = parts[1];
-      datePart = parts.slice(2).join(" | ");
-    } else if (parts.length === 2) {
-      datePart = parts[1];
-    }
-    let startDate = "";
-    let endDate = "";
-    const m = datePart.match(/^(.*?)-(.*)$/);
-    if (m) {
-      startDate = m[1].trim();
-      endDate = m[2].trim();
-    } else {
-      startDate = datePart;
-    }
-    return { company, location, startDate, endDate };
-  };
-
-  const formatExperienceMeta = ({ company, location, startDate, endDate }) => {
-    const parts = [];
-    if (company) parts.push(company);
-    if (location) parts.push(location);
-    const datePart =
-      startDate || endDate
-        ? [startDate, endDate || "Present"].filter(Boolean).join(" - ")
-        : "";
-    if (datePart) parts.push(datePart);
-    return parts.join(" | ");
-  };
-
-  const updateExperienceMetaField = (sectionIndex, itemIndex, field, value) => {
-    setEditingParsed((prev) => {
-      const sections = [...(prev.sections || [])];
-      const sec = sections[sectionIndex];
-      const items = [...(sec.items || [])];
-      const item = { ...items[itemIndex] };
-      const meta = parseExperienceMeta(item.subheading);
-      const nextMeta = { ...meta, [field]: value };
-      item.subheading = formatExperienceMeta(nextMeta);
-      items[itemIndex] = item;
-      sections[sectionIndex] = { ...sec, items };
-      return { ...prev, sections };
-    });
-  };
-
-  const setSectionContentType = (sectionIndex, content_type) => {
-    setEditingParsed((prev) => {
-      const sections = [...(prev.sections || [])];
-      sections[sectionIndex] = {
-        ...sections[sectionIndex],
-        content_type,
-        text: content_type === "text" ? (sections[sectionIndex].text || "") : "",
-        items: content_type === "list" ? (sections[sectionIndex].items?.length ? sections[sectionIndex].items : [{ heading: "", subheading: "", body: "" }]) : [],
-      };
-      return { ...prev, sections };
-    });
-  };
-
-  const contact = editingParsed.contact || {};
-  const sections = editingParsed.sections || [];
-
   if (selectedId && resume) {
     return (
-      <Box sx={{ maxWidth: 800, mx: "auto", p: 2 }}>
+      <Box sx={{ maxWidth: 1200, mx: "auto", p: 2 }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
           <IconButton onClick={handleBack} aria-label="Back to list">
             <ArrowBackIcon />
@@ -651,218 +579,106 @@ export default function ResumesPage() {
           onChange={(e) => setEditingName(e.target.value)}
           sx={{ mb: 2 }}
         />
-        <Typography variant="subtitle2" color="text.secondary" sx={{ mt: 2, mb: 1 }}>
-          Contact
-        </Typography>
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 3 }}>
-          <TextField
-            size="small"
-            label="Full name"
-            value={contact.name}
-            onChange={(e) => updateContact("name", e.target.value)}
-          />
-          <TextField
-            size="small"
-            label="Email"
-            type="email"
-            value={contact.email}
-            onChange={(e) => updateContact("email", e.target.value)}
-          />
-          <TextField
-            size="small"
-            label="Phone"
-            value={contact.phone}
-            onChange={(e) => updateContact("phone", e.target.value)}
-          />
-        </Box>
 
-        <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
-          Sections (drag order with arrows)
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 1,
+            flexWrap: "wrap",
+            mb: 1,
+          }}
+        >
+          <Typography variant="subtitle2" color="text.secondary">
+            Details
+          </Typography>
+          <ToggleButtonGroup
+            value={editorLayout}
+            exclusive
+            onChange={(_, v) => v != null && setEditorLayout(v)}
+            size="small"
+            aria-label="Form and preview layout"
+          >
+            <ToggleButton value="split">Split</ToggleButton>
+            <ToggleButton value="form">Form only</ToggleButton>
+            <ToggleButton value="preview">Preview only</ToggleButton>
+          </ToggleButtonGroup>
+          <Tooltip title="Open large preview (Markdown)">
+            <IconButton size="small" aria-label="Open large preview" onClick={() => setEditPreviewOpen(true)}>
+              <OpenInFullIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Box>
+        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
+          Fill in the form; the preview shows Markdown generated for PDF export and review.
         </Typography>
-        {sections.map((sec, secIdx) => (
-          <Paper key={sec.id || secIdx} variant="outlined" sx={{ p: 2, mb: 2 }}>
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap", mb: 1.5 }}>
-              <IconButton size="small" onClick={() => moveSection(secIdx, "up")} disabled={secIdx === 0} aria-label="Move up">
-                <ArrowUpwardIcon fontSize="small" />
-              </IconButton>
-              <IconButton size="small" onClick={() => moveSection(secIdx, "down")} disabled={secIdx === sections.length - 1} aria-label="Move down">
-                <ArrowDownwardIcon fontSize="small" />
-              </IconButton>
-              <TextField
-                size="small"
-                label="Section name"
-                value={sec.name}
-                onChange={(e) => updateSection(secIdx, { name: e.target.value })}
-                sx={{ width: 200 }}
-              />
-              <Button
-                size="small"
-                variant={sec.content_type === "text" ? "outlined" : "text"}
-                onClick={() => setSectionContentType(secIdx, "text")}
-              >
-                Text
-              </Button>
-              <Button
-                size="small"
-                variant={sec.content_type === "list" ? "outlined" : "text"}
-                onClick={() => setSectionContentType(secIdx, "list")}
-              >
-                List
-              </Button>
-              <IconButton size="small" onClick={() => removeSection(secIdx)} aria-label="Remove section">
-                <DeleteOutlineIcon fontSize="small" />
-              </IconButton>
+
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection:
+              editorLayout === "split" ? { xs: "column", md: "row" } : "column",
+            gap: 2,
+            alignItems: "stretch",
+            mb: 2,
+          }}
+        >
+          {editorLayout !== "preview" && (
+            <Box
+              sx={{
+                flex: editorLayout === "split" ? 1 : undefined,
+                minWidth: 0,
+                maxHeight: editorLayout === "split" ? { md: "min(70vh, 720px)" } : undefined,
+                overflow: editorLayout === "split" ? { md: "auto" } : "visible",
+              }}
+            >
+              <ResumeFormEditor value={editingForm} onChange={(next) => setEditingForm(ensureParsedShape(next))} />
             </Box>
-            {sec.content_type === "text" ? (
-              <TextField
-                fullWidth
-                multiline
-                rows={4}
-                label="Content"
-                value={sec.text || ""}
-                onChange={(e) => updateSection(secIdx, { text: e.target.value })}
-              />
-            ) : (
-              <>
-                {(sec.items || []).map((item, itemIdx) => {
-                  const isExperience = (sec.name || "").toLowerCase() === "experience";
-                  const bullets = getBullets(item.body);
-                  const meta = isExperience ? parseExperienceMeta(item.subheading) : null;
-                  return (
-                    <Box key={itemIdx} sx={{ mb: 1.5, pl: 1, borderLeft: 2, borderColor: "divider" }}>
-                      <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
-                        <IconButton size="small" onClick={() => removeSectionItem(secIdx, itemIdx)}>
-                          <DeleteOutlineIcon fontSize="small" />
-                        </IconButton>
-                      </Box>
-                      <TextField
-                        size="small"
-                        fullWidth
-                        label="Heading"
-                        value={item.heading || ""}
-                        onChange={(e) => updateSectionItem(secIdx, itemIdx, "heading", e.target.value)}
-                        sx={{ mb: 1 }}
-                      />
-                      {isExperience ? (
-                        <>
-                          <Box sx={{ display: "flex", gap: 1, mb: 1, flexWrap: "wrap" }}>
-                            <TextField
-                              size="small"
-                              label="Company"
-                              value={meta.company}
-                              onChange={(e) =>
-                                updateExperienceMetaField(secIdx, itemIdx, "company", e.target.value)
-                              }
-                              sx={{ flex: 1, minWidth: 140 }}
-                            />
-                            <TextField
-                              size="small"
-                              label="Location (optional)"
-                              value={meta.location}
-                              onChange={(e) =>
-                                updateExperienceMetaField(secIdx, itemIdx, "location", e.target.value)
-                              }
-                              sx={{ flex: 1, minWidth: 140 }}
-                            />
-                          </Box>
-                          <Box sx={{ display: "flex", gap: 1, mb: 1, flexWrap: "wrap" }}>
-                            <TextField
-                              size="small"
-                              label="Start date"
-                              placeholder="Jan 2020"
-                              value={meta.startDate}
-                              onChange={(e) =>
-                                updateExperienceMetaField(secIdx, itemIdx, "startDate", e.target.value)
-                              }
-                              sx={{ flex: 1, minWidth: 140 }}
-                            />
-                            <TextField
-                              size="small"
-                              label="End date or Present"
-                              placeholder="Present"
-                              value={meta.endDate}
-                              onChange={(e) =>
-                                updateExperienceMetaField(secIdx, itemIdx, "endDate", e.target.value)
-                              }
-                              sx={{ flex: 1, minWidth: 140 }}
-                            />
-                          </Box>
-                        </>
-                      ) : (
-                        <TextField
-                          size="small"
-                          fullWidth
-                          label="Subheading"
-                          value={item.subheading || ""}
-                          onChange={(e) => updateSectionItem(secIdx, itemIdx, "subheading", e.target.value)}
-                          sx={{ mb: 1 }}
-                        />
-                      )}
-                      {isExperience ? (
-                        <Box sx={{ mt: 1 }}>
-                          <Typography
-                            variant="caption"
-                            color="text.secondary"
-                            display="block"
-                            sx={{ mb: 0.5 }}
-                          >
-                            Bullet points
-                          </Typography>
-                          {bullets.map((bullet, bulletIdx) => (
-                            <Box
-                              key={bulletIdx}
-                              sx={{ display: "flex", alignItems: "flex-start", gap: 0.5, mb: 1 }}
-                            >
-                              <TextField
-                                size="small"
-                                fullWidth
-                                placeholder={`Bullet ${bulletIdx + 1}`}
-                                value={bullet}
-                                onChange={(e) =>
-                                  updateSectionItemBullet(secIdx, itemIdx, bulletIdx, e.target.value)
-                                }
-                              />
-                              <IconButton
-                                size="small"
-                                onClick={() => removeSectionItemBullet(secIdx, itemIdx, bulletIdx)}
-                                aria-label="Remove bullet"
-                              >
-                                <DeleteOutlineIcon fontSize="small" />
-                              </IconButton>
-                            </Box>
-                          ))}
-                          <Button
-                            size="small"
-                            startIcon={<AddIcon />}
-                            onClick={() => addSectionItemBullet(secIdx, itemIdx)}
-                          >
-                            Add bullet
-                          </Button>
-                        </Box>
-                      ) : (
-                        <TextField
-                          size="small"
-                          fullWidth
-                          multiline
-                          rows={2}
-                          label="Body"
-                          value={item.body || ""}
-                          onChange={(e) => updateSectionItem(secIdx, itemIdx, "body", e.target.value)}
-                        />
-                      )}
-                    </Box>
-                  );
-                })}
-                <Button size="small" startIcon={<AddIcon />} onClick={() => addSectionItem(secIdx)}>
-                  Add item
-                </Button>
-              </>
-            )}
-          </Paper>
-        ))}
-        <Button startIcon={<AddIcon />} onClick={addSection} sx={{ mb: 3 }}>
-          Add section
-        </Button>
+          )}
+          {editorLayout !== "form" && (
+            <Paper
+              variant="outlined"
+              sx={{
+                flex: editorLayout === "split" ? 1 : undefined,
+                minWidth: 0,
+                p: 2,
+                maxHeight: { md: "min(70vh, 720px)" },
+                overflow: "auto",
+                bgcolor: "background.default",
+              }}
+            >
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  justifyContent: "space-between",
+                  gap: 1,
+                  mb: 1,
+                  flexWrap: "wrap",
+                }}
+              >
+                <Typography variant="caption" color="text.secondary" sx={{ flex: "1 1 200px", minWidth: 0 }}>
+                  Horizontal lines mark approximate page breaks (US Letter, same margins as export). Preview uses
+                  the same point sizes and column width as the PDF; spacing may still differ slightly.
+                </Typography>
+                <Tooltip title="PDF is generated from the saved resume on the server. Save first if you have unsaved changes.">
+                  <span>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={exportLoading ? <CircularProgress size={16} /> : <DownloadIcon />}
+                      disabled={exportLoading}
+                      onClick={handleExport}
+                    >
+                      Download PDF
+                    </Button>
+                  </span>
+                </Tooltip>
+              </Box>
+              <MarkdownPreview markdown={derivedMarkdown} />
+            </Paper>
+          )}
+        </Box>
 
         <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
           <Button
@@ -891,6 +707,16 @@ export default function ResumesPage() {
           </Button>
         </Box>
 
+        <ResumePreviewDialog
+          open={editPreviewOpen}
+          title={editingName ? `Preview — ${editingName}` : "Preview"}
+          markdown={derivedMarkdown}
+          loading={false}
+          onClose={() => setEditPreviewOpen(false)}
+          onDownloadPdf={handleExport}
+          downloadLoading={exportLoading}
+        />
+
         <SuggestionsDrawer
           open={suggestionsOpen}
           onClose={() => setSuggestionsOpen(false)}
@@ -914,12 +740,11 @@ export default function ResumesPage() {
       <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
         <Button
           variant="contained"
-          component="label"
-          disabled={uploading}
-          startIcon={uploading ? <CircularProgress size={18} /> : <AddIcon />}
+          disabled={creating}
+          startIcon={creating ? <CircularProgress size={18} /> : <AddIcon />}
+          onClick={handleNew}
         >
-          {uploading ? "Uploading…" : "Upload resume"}
-          <input type="file" accept=".pdf,application/pdf" hidden onChange={handleUpload} />
+          {creating ? "Creating…" : "New resume"}
         </Button>
       </Box>
       {loading ? (
@@ -927,7 +752,9 @@ export default function ResumesPage() {
           <CircularProgress />
         </Box>
       ) : resumes.length === 0 ? (
-        <Typography color="text.secondary">No resumes yet. Upload a PDF to get started.</Typography>
+        <Typography color="text.secondary">
+          No resumes yet. Create one by filling in the form; we convert it to Markdown for preview and PDF.
+        </Typography>
       ) : (
         <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
           {resumes.map((r) => (
@@ -935,11 +762,37 @@ export default function ResumesPage() {
               key={r.id}
               resume={r}
               onOpen={handleOpen}
+              onPreview={openListPreview}
               onDelete={(res) => setDeleteTarget(res)}
             />
           ))}
         </Box>
       )}
+
+      <ResumePreviewDialog
+        open={!!listPreview}
+        title={listPreview?.title || "Preview"}
+        markdown={listPreview?.markdown}
+        loading={!!listPreview?.loading}
+        onClose={() => setListPreview(null)}
+        onDownloadPdf={listPreview?.id ? handleListPreviewExport : undefined}
+        downloadLoading={listExportLoading}
+        footer={
+          <DialogActions sx={{ px: 2, pb: 2 }}>
+            <Button onClick={() => setListPreview(null)}>Close</Button>
+            <Button
+              variant="contained"
+              onClick={() => {
+                const id = listPreview?.id;
+                setListPreview(null);
+                if (id) handleOpen(id);
+              }}
+            >
+              Edit
+            </Button>
+          </DialogActions>
+        }
+      />
 
       <ConfirmModal
         open={!!deleteTarget}

@@ -27,11 +27,20 @@ logger = logging.getLogger(__name__)
 
 MAX_PAGES = 20
 
+# Gmail labels we never ingest (unsent drafts, spam, trash).
+_EXCLUDED_SYNC_LABELS = ("drafts", "spam", "trash")
+
 
 def _after_query_from_epoch(epoch_sec: int) -> str:
     """Format epoch seconds as Gmail's documented after:YYYY/MM/DD query."""
     dt = datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
     return dt.strftime("%Y/%m/%d")
+
+
+def build_sync_query(after_date: str) -> str:
+    """Gmail search query for sync: date window minus drafts/spam/trash."""
+    exclusions = " ".join(f"-in:{label}" for label in _EXCLUDED_SYNC_LABELS)
+    return f"after:{after_date} {exclusions}".strip()
 
 
 class PollingChangeSource(ChangeSource):
@@ -67,14 +76,15 @@ class PollingChangeSource(ChangeSource):
         page_token: str | None = None
 
         after_query = _after_query_from_epoch(after_epoch)
+        sync_query = build_sync_query(after_query)
         logger.info(
-            "Gmail after query: after:%s (from epoch=%s)",
-            after_query,
+            "Gmail sync query: %s (from epoch=%s)",
+            sync_query,
             after_epoch,
         )
         for page_num in range(MAX_PAGES):
             params: dict[str, Any] = {
-                "q": f"after:{after_query}",
+                "q": sync_query,
                 "maxResults": 100,
             }
             if page_token:

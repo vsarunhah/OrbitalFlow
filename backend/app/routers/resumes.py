@@ -14,17 +14,41 @@ from app.models.resume import Resume
 from app.schemas.resume import (
     ParsedResume,
     ResumeListItem,
+    ResumeManualCreate,
     ResumeReviewResponse,
     ResumeSchema,
     ResumeUpdate,
 )
 from app.services.resume_parser import parse_pdf_resume
-from app.services.resume_pdf import build_pdf
+from app.services.resume_pdf import build_pdf, build_pdf_from_markdown
 from app.services.resume_review import run_resume_review
 
 router = APIRouter(prefix="/resumes", tags=["resumes"])
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+@router.post("", response_model=ResumeSchema)
+def create_resume(
+    body: ResumeManualCreate,
+    auth: AuthContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a resume from Markdown (edited in the app)."""
+    parsed_json: dict = {"format": "markdown", "markdown": body.markdown}
+    if body.source_form is not None:
+        parsed_json["source_form"] = body.source_form
+    resume = Resume(
+        tenant_id=auth.tenant_id,
+        created_by_user_id=auth.user_id,
+        name=body.name.strip()[:255],
+        original_filename=None,
+        parsed_json=parsed_json,
+    )
+    db.add(resume)
+    db.commit()
+    db.refresh(resume)
+    return ResumeSchema.model_validate(resume)
 
 
 @router.post("/upload", response_model=ResumeSchema)
@@ -193,14 +217,24 @@ def export_resume_pdf(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Resume not found",
         )
-    try:
-        parsed = ParsedResume.from_parsed_json(resume.parsed_json or {})
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid resume content; cannot generate PDF",
-        )
-    pdf_bytes = build_pdf(parsed)
+    pj = resume.parsed_json or {}
+    if pj.get("format") == "markdown":
+        try:
+            pdf_bytes = build_pdf_from_markdown(pj.get("markdown") or "")
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not generate PDF from resume Markdown",
+            )
+    else:
+        try:
+            parsed = ParsedResume.from_parsed_json(pj)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid resume content; cannot generate PDF",
+            )
+        pdf_bytes = build_pdf(parsed)
     filename = (resume.name or "resume").replace(" ", "_") + ".pdf"
     return Response(
         content=pdf_bytes,

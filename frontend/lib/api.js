@@ -375,6 +375,12 @@ export function generateFollowUpSuggestion(jobId) {
 
 // ----- Resumes -----
 
+export function createResume({ name, markdown = "", sourceForm } = {}) {
+  const body = { name, markdown };
+  if (sourceForm != null) body.source_form = sourceForm;
+  return request("/resumes", { method: "POST", body });
+}
+
 export function uploadResume(file) {
   const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
   const token = getToken();

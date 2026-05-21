@@ -62,15 +62,44 @@ def test_list_resumes_requires_auth(client):
     assert r.status_code == 401
 
 
-def test_resume_crud_and_export(client, auth_header):
-    pdf = _minimal_pdf_bytes()
-    upload = client.post(
-        "/resumes/upload",
+def test_create_resume_stores_optional_source_form(client, auth_header):
+    form = {
+        "contact": {"name": "Ada", "email": "ada@example.com", "phone": ""},
+        "sections": [],
+    }
+    r = client.post(
+        "/resumes",
         headers=auth_header,
-        files={"file": ("resume.pdf", io.BytesIO(pdf), "application/pdf")},
+        json={"name": "CV", "markdown": "# Ada\n", "source_form": form},
     )
-    assert upload.status_code == 200
-    resume_id = upload.json()["id"]
+    assert r.status_code == 200
+    assert r.json()["parsed_json"]["source_form"] == form
+
+
+def test_create_resume_markdown_and_export(client, auth_header):
+    r = client.post(
+        "/resumes",
+        headers=auth_header,
+        json={"name": "My CV", "markdown": "# Jane Doe\n\njane@example.com\n\n## Summary\n\nEngineer."},
+    )
+    assert r.status_code == 200
+    resume_id = r.json()["id"]
+    assert r.json()["parsed_json"]["format"] == "markdown"
+
+    export_r = client.get(f"/resumes/{resume_id}/export", headers=auth_header)
+    assert export_r.status_code == 200
+    assert export_r.headers.get("content-type", "").startswith("application/pdf")
+    assert len(export_r.content) > 100
+
+
+def test_resume_crud_and_export(client, auth_header):
+    r = client.post(
+        "/resumes",
+        headers=auth_header,
+        json={"name": "resume.pdf", "markdown": "# John Doe\n\nSummary here."},
+    )
+    assert r.status_code == 200
+    resume_id = r.json()["id"]
 
     # List
     list_r = client.get("/resumes", headers=auth_header)

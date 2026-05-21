@@ -142,6 +142,13 @@ class ResumeUpdate(BaseModel):
     parsed_json: dict | None = None
 
 
+class ResumeManualCreate(BaseModel):
+    """Request body for POST /resumes — create a resume from Markdown (+ optional structured form)."""
+    name: str = Field(..., min_length=1, max_length=255)
+    markdown: str = Field(default="", max_length=500_000)
+    source_form: dict | None = None
+
+
 class ResumeSchema(BaseModel):
     """Resume as returned by API."""
     model_config = ConfigDict(from_attributes=True)

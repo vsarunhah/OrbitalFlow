@@ -38,6 +38,11 @@ from app.services.stage_reducer import compute_new_stage
 logger = logging.getLogger(__name__)
 
 FUZZY_THRESHOLD = 0.75
+# Identities must resemble the job's primary company (guards stale aliases after renames
+# and platform names like "Paraform" stored on employer jobs).
+IDENTITY_ALIAS_THRESHOLD = 0.85
+# Recruiting marketplaces — not the hiring company when the subject says "referred on …".
+RECRUITING_PLATFORMS = frozenset({"paraform"})
 
 
 def _dt_utc(dt: datetime) -> datetime:
@@ -90,7 +95,8 @@ def process_extraction_for_job(
 
     _ensure_thread_link(db, tenant_id, job, message)
     if created and extraction.company and extraction.role:
-        _add_identity(db, tenant_id, job, extraction)
+        if _should_store_identity(job, extraction.company):
+            _add_identity(db, tenant_id, job, extraction)
 
     _create_contacts_for_job(db, tenant_id, job, message, extraction)
 
@@ -220,10 +226,13 @@ def _fuzzy_match(
         .all()
     )
     for ident in identities:
+        ident_job = db.query(Job).filter(Job.id == ident.job_id).first()
+        if not ident_job or not _identity_belongs_to_job(ident_job, ident):
+            continue
         score = _similarity(company, ident.company) * 0.6 + _similarity(role, ident.role) * 0.4
         if score > best_score:
             best_score = score
-            best_job = db.query(Job).filter(Job.id == ident.job_id).first()
+            best_job = ident_job
 
     if best_score >= FUZZY_THRESHOLD:
         return best_job
@@ -234,6 +243,34 @@ def _similarity(a: str | None, b: str | None) -> float:
     if not a or not b:
         return 0.0
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+
+def _normalize_company(name: str | None) -> str:
+    if not name:
+        return ""
+    return name.lower().strip()
+
+
+def _is_recruiting_platform(company: str | None) -> bool:
+    return _normalize_company(company) in RECRUITING_PLATFORMS
+
+
+def _identity_belongs_to_job(job: Job, identity: JobIdentity) -> bool:
+    """True when an identity row is a plausible alias for the job's employer."""
+    if not identity.company or not job.company:
+        return False
+    if _is_recruiting_platform(identity.company) and not _is_recruiting_platform(job.company):
+        return False
+    return _similarity(identity.company, job.company) >= IDENTITY_ALIAS_THRESHOLD
+
+
+def _should_store_identity(job: Job, company: str) -> bool:
+    """Skip platform/marketplace names as aliases on unrelated employer jobs."""
+    if not job.company:
+        return True
+    if _is_recruiting_platform(company) and not _is_recruiting_platform(job.company):
+        return False
+    return _similarity(company, job.company) >= IDENTITY_ALIAS_THRESHOLD
 
 
 # --------------- creation helpers ---------------

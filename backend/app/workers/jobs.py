@@ -26,7 +26,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models.email_account import EmailAccount
 from app.models.message import Message
-from app.providers.gmail import GmailProvider, TokenRefreshError
+from app.providers.gmail import GmailProvider, TokenRefreshError, should_skip_ingest
 from app.providers.polling import PollingChangeSource
 
 logger = logging.getLogger(__name__)
@@ -171,6 +171,21 @@ def process_message(account_id: str, provider_msg_id: str) -> dict:
 
         provider = GmailProvider(db_session=db)
         fetched = provider.fetch_message(account, provider_msg_id)
+
+        label_ids: list[str] = []
+        if fetched.label_ids_json:
+            try:
+                label_ids = json.loads(fetched.label_ids_json)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if should_skip_ingest(label_ids):
+            logger.info(
+                "Skipping message with excluded labels %s. account_id=%s provider_msg_id=%s",
+                label_ids,
+                account_id,
+                provider_msg_id,
+            )
+            return {"status": "skipped", "reason": "excluded_labels"}
 
         date_header_dt = None
         if fetched.date_header:

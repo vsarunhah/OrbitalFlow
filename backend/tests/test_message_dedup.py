@@ -249,3 +249,39 @@ class TestProcessMessageDedup:
             Message.account_id == account.id,
         ).count()
         assert count == 1
+
+    @patch("app.workers.jobs.SessionLocal")
+    @patch("app.workers.jobs.GmailProvider")
+    def test_process_message_skips_draft_label(
+        self, mock_provider_cls, mock_session_cls, db, tenant_and_account
+    ):
+        _, account = tenant_and_account
+        fetched = self._fake_fetched("msg_draft_001")
+        fetched = FetchedMessage(
+            provider_msg_id=fetched.provider_msg_id,
+            thread_id=fetched.thread_id,
+            subject=fetched.subject,
+            from_address=fetched.from_address,
+            to_addresses=fetched.to_addresses,
+            date_header=fetched.date_header,
+            body_text=fetched.body_text,
+            body_html=fetched.body_html,
+            headers_json=fetched.headers_json,
+            raw_payload_json=fetched.raw_payload_json,
+            label_ids_json=json.dumps(["DRAFT"]),
+        )
+        mock_provider_cls.return_value.fetch_message.return_value = fetched
+        mock_session_cls.return_value = db
+
+        from app.workers.jobs import process_message
+
+        result = process_message(str(account.id), "msg_draft_001")
+        assert result["status"] == "skipped"
+        assert result["reason"] == "excluded_labels"
+
+        assert (
+            db.query(Message)
+            .filter(Message.provider_msg_id == "msg_draft_001")
+            .first()
+            is None
+        )

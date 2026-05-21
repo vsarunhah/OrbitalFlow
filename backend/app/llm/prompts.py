@@ -37,6 +37,10 @@ Rules:
 - If unsure between INTERVIEW_REQUEST and INTERVIEW_SCHEDULED, prefer INTERVIEW_REQUEST.
 - If unsure, use category "OTHER" and event_type "NONE" with low confidence.
 - Extract company, role, and req_id when clearly present; otherwise null.
+- Paraform is a recruiting marketplace. When the subject or body says someone was "referred on Paraform"
+  (e.g. "Varun & Alec (AfterQuery): referred on Paraform"), set company to the employer in parentheses
+  (AfterQuery), NOT "Paraform". Use company "Paraform" only when Paraform itself is the hiring company
+  (e.g. cold outreach to join Paraform's own engineering team).
 - confidence should reflect how certain you are about the category and event_type.
 - For non-ALERT emails, "jobs" should be an empty array [].
 - Do NOT invent information not present in the email.
@@ -306,10 +310,10 @@ def build_user_content(
 # --------------- Resume review (suggestions) ---------------
 
 RESUME_REVIEW_SYSTEM_PROMPT = """\
-You are an expert resume reviewer. You will be given a resume with contact info and configurable sections (each section has a name and either text or a list of items). Your job is to suggest concrete improvements to make the resume stronger for job applications and ATS.
+You are an expert resume reviewer. You will be given a resume in one of two forms: (1) Markdown — the full document; or (2) structured contact info plus configurable sections (each section has a name and either text or a list of items). Your job is to suggest concrete improvements for job applications and ATS.
 
 Return ONLY a JSON object with a single key "suggestions" whose value is an array of suggestion objects. Each object must have exactly these fields:
-- "section": string identifying where the change applies: use the section name as shown (e.g. "Summary", "Experience", "Skills") or "sections[N]" for the N-th section (0-based), and for list sections use "sections[N].items[M].body" or ".heading" or ".subheading".
+- "section": string identifying where the change applies. For Markdown resumes use "markdown" and put the exact span to replace in current_value and the replacement in suggested_value (or describe the edit in suggested_value if a single replacement is not practical). For structured resumes use the section name (e.g. "Summary", "Experience", "Skills") or "sections[N]" for the N-th section (0-based), and for list sections use "sections[N].items[M].body" or ".heading" or ".subheading".
 - "suggestion_type": one of "wording", "add_detail", "ats_friendly", "consistency", "missing".
 - "current_value": optional string, a short excerpt of the current content (omit if not applicable).
 - "suggested_value": optional string, the replacement text or concrete instruction (omit if just a comment).
@@ -321,8 +325,16 @@ Output ONLY valid JSON, no markdown fences, no explanation outside the JSON.
 
 
 def build_resume_review_user_content(parsed_json: dict) -> str:
-    """Build user message for resume review from parsed_json (contact + sections)."""
-    parts = ["Resume content to review:", ""]
+    """Build user message for resume review from parsed_json (Markdown or contact + sections)."""
+    if parsed_json.get("format") == "markdown":
+        md = parsed_json.get("markdown") or ""
+        return (
+            "Resume content to review (Markdown):\n\n"
+            "---\n\n"
+            f"{md}\n\n"
+            "---"
+        )
+    parts = ["Resume content to review (structured):", ""]
     contact = parsed_json.get("contact") or {}
     if not contact and parsed_json.get("name") is not None:
         contact = {

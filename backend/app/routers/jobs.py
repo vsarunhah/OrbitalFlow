@@ -31,6 +31,8 @@ from app.schemas.job import (
     JobSummary,
     JobsMergeRequest,
     JobsMergeResult,
+    ImportEmailLinkRequest,
+    ImportEmailLinkResult,
     JobTimeline,
     JobUpdate,
     ManualStageChange,
@@ -51,6 +53,7 @@ from app.schemas.draft import (
     ReplyVariantSchema,
 )
 from app.services.followup_generation import generate_followup_suggestion
+from app.services.force_index_email import ForceIndexError, force_index_email_link
 from app.services.job_merge import merge_job_into_target
 from app.services.job_messages import load_accounts_for_messages, load_messages_for_jobs
 from app.services.job_read_state import (
@@ -156,6 +159,37 @@ def merge_jobs(
         merged_job_id=target.id,
         removed_job_ids=list(body.source_job_ids),
         status="merged",
+    )
+
+
+@router.post("/import-email-link", response_model=ImportEmailLinkResult)
+def import_email_link(
+    body: ImportEmailLinkRequest,
+    auth: AuthContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch a Gmail message/thread from a link and attach it to a job."""
+    try:
+        result = force_index_email_link(
+            db,
+            auth.tenant_id,
+            body.email_url,
+            job_id=body.job_id,
+            company=body.company,
+            role=body.role,
+        )
+    except ForceIndexError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return ImportEmailLinkResult(
+        job_id=result.job_id,
+        job_created=result.job_created,
+        messages_ingested=result.messages_ingested,
+        messages_linked=result.messages_linked,
+        thread_ids=result.thread_ids,
     )
 
 

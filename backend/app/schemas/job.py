@@ -167,3 +167,24 @@ class JobsMergeResult(BaseModel):
     merged_job_id: uuid.UUID
     removed_job_ids: list[uuid.UUID]
     status: str = "merged"
+
+
+class ImportEmailLinkRequest(BaseModel):
+    email_url: str = Field(..., min_length=1, max_length=4096)
+    job_id: uuid.UUID | None = Field(
+        None, description="Existing job to attach the email to; omit to create a new job"
+    )
+    company: str | None = Field(
+        None, max_length=255, description="Optional company name when creating a new job"
+    )
+    role: str | None = Field(
+        None, max_length=255, description="Optional role when creating a new job"
+    )
+
+
+class ImportEmailLinkResult(BaseModel):
+    job_id: uuid.UUID
+    job_created: bool
+    messages_ingested: int
+    messages_linked: int
+    thread_ids: list[str] = Field(default_factory=list)

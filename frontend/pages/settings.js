@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/router";
 import Box from "@mui/material/Box";
 import Paper from "@mui/material/Paper";
@@ -6,6 +6,7 @@ import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
 import Alert from "@mui/material/Alert";
 import TextField from "@mui/material/TextField";
+import Autocomplete from "@mui/material/Autocomplete";
 import FormControl from "@mui/material/FormControl";
 import Select from "@mui/material/Select";
 import MenuItem from "@mui/material/MenuItem";
@@ -19,8 +20,15 @@ import {
   deleteAccountMessages,
   checkLlmKey,
   setLlmKey,
+  getUserProfile,
+  updateUserProfile,
 } from "../lib/api";
 import ConfirmModal from "../components/ConfirmModal";
+import {
+  browserTimezone,
+  formatTimezoneLabel,
+  getTimezoneOptions,
+} from "../lib/timezones";
 
 const SYNC_PERIODS = [
   { label: "Last 1 day", days: 1 },
@@ -442,6 +450,232 @@ function LlmKeySection() {
   );
 }
 
+const COMPANY_SIZE_OPTIONS = [
+  { id: "startup", label: "Startup (1–50)" },
+  { id: "small", label: "Small (51–200)" },
+  { id: "mid", label: "Mid (201–1k)" },
+  { id: "large", label: "Large (1k–10k)" },
+  { id: "enterprise", label: "Enterprise (10k+)" },
+];
+
+const WORK_ARRANGEMENT_OPTIONS = [
+  { id: "remote", label: "Remote" },
+  { id: "hybrid", label: "Hybrid" },
+  { id: "onsite", label: "On-site" },
+  { id: "flexible", label: "Flexible" },
+];
+
+const TIMEZONE_NOT_SPECIFIED = { value: "", label: "Not specified" };
+
+function ProfileMultiSelect({ label, options, selectedIds, onChange, placeholder }) {
+  const selectedOptions = useMemo(
+    () => options.filter((option) => selectedIds.includes(option.id)),
+    [options, selectedIds]
+  );
+
+  return (
+    <Autocomplete
+      multiple
+      size="small"
+      options={options}
+      value={selectedOptions}
+      onChange={(_, next) => onChange(next.map((option) => option.id))}
+      getOptionLabel={(option) => option.label}
+      isOptionEqualToValue={(a, b) => a.id === b.id}
+      disableCloseOnSelect
+      renderInput={(params) => (
+        <TextField {...params} label={label} placeholder={placeholder} />
+      )}
+      sx={{ maxWidth: 480 }}
+    />
+  );
+}
+
+function JobSeekerProfileSection() {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
+  const [displayName, setDisplayName] = useState("");
+  const [timezone, setTimezone] = useState("");
+  const [locationPreferences, setLocationPreferences] = useState("");
+  const [workArrangements, setWorkArrangements] = useState([]);
+  const [compensation, setCompensation] = useState("");
+  const [companySizes, setCompanySizes] = useState([]);
+  const [availabilityNotes, setAvailabilityNotes] = useState("");
+
+  useEffect(() => {
+    getUserProfile()
+      .then((p) => {
+        setDisplayName(p.display_name || "");
+        setTimezone(p.timezone || "");
+        setLocationPreferences(p.location_preferences || "");
+        setWorkArrangements(p.work_arrangements || []);
+        setCompensation(p.compensation_expectations || "");
+        setCompanySizes(p.preferred_company_sizes || []);
+        setAvailabilityNotes(p.availability_notes || "");
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function handleSave() {
+    setSaving(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      await updateUserProfile({
+        display_name: displayName.trim() || null,
+        timezone: timezone.trim() || null,
+        location_preferences: locationPreferences.trim() || null,
+        work_arrangements: workArrangements,
+        compensation_expectations: compensation.trim() || null,
+        preferred_company_sizes: companySizes,
+        availability_notes: availabilityNotes.trim() || null,
+      });
+      setSuccess("Profile saved. AI drafts will use these preferences.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const defaultTz = browserTimezone();
+  const timezoneOptions = useMemo(() => getTimezoneOptions(), []);
+
+  const timezoneSelectOptions = useMemo(() => {
+    const options = [TIMEZONE_NOT_SPECIFIED, ...timezoneOptions];
+    if (timezone && !options.some((o) => o.value === timezone)) {
+      options.push({
+        value: timezone,
+        label: formatTimezoneLabel(timezone),
+        offsetMinutes: 0,
+      });
+      options.sort(
+        (a, b) =>
+          a.offsetMinutes - b.offsetMinutes || a.value.localeCompare(b.value)
+      );
+    }
+    return options;
+  }, [timezone, timezoneOptions]);
+
+  const selectedTimezoneOption = useMemo(
+    () =>
+      timezoneSelectOptions.find((o) => o.value === timezone) ??
+      TIMEZONE_NOT_SPECIFIED,
+    [timezone, timezoneSelectOptions]
+  );
+
+  return (
+    <Paper variant="outlined" sx={{ p: 3, mb: 2 }}>
+      <Typography variant="h6" fontWeight={600} gutterBottom>
+        Job seeker profile
+      </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 520 }}>
+        Used when generating reply drafts: location and compensation preferences, company size,
+        and calendar availability (when Google Calendar is connected).
+      </Typography>
+
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {success && <Alert severity="success" sx={{ mb: 2 }}>{success}</Alert>}
+
+      {loading ? (
+        <Typography color="text.secondary">Loading profile...</Typography>
+      ) : (
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <TextField
+            label="Display name"
+            size="small"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="How you sign emails"
+          />
+          <Autocomplete
+            size="small"
+            options={timezoneSelectOptions}
+            value={selectedTimezoneOption}
+            onChange={(_, option) => setTimezone(option?.value ?? "")}
+            getOptionLabel={(option) => option.label}
+            isOptionEqualToValue={(a, b) => a.value === b.value}
+            autoHighlight
+            filterOptions={(options, { inputValue }) => {
+              const query = inputValue.trim().toLowerCase();
+              if (!query) return options;
+              return options.filter(
+                (option) =>
+                  !option.value ||
+                  option.label.toLowerCase().includes(query) ||
+                  option.value.toLowerCase().includes(query.replace(/\s/g, "_"))
+              );
+            }}
+            renderOption={(props, option) => (
+              <li {...props} key={option.value || "none"}>
+                {option.value ? option.label : <em>{option.label}</em>}
+              </li>
+            )}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Timezone"
+                placeholder={formatTimezoneLabel(defaultTz)}
+              />
+            )}
+            ListboxProps={{ style: { maxHeight: 320 } }}
+            sx={{ maxWidth: 480 }}
+          />
+          <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+            Used for scheduling. Browser default: {formatTimezoneLabel(defaultTz)}
+          </Typography>
+          <TextField
+            label="Location preferences"
+            size="small"
+            multiline
+            minRows={2}
+            value={locationPreferences}
+            onChange={(e) => setLocationPreferences(e.target.value)}
+            placeholder="Remote US; open to SF hybrid 2×/month"
+          />
+          <ProfileMultiSelect
+            label="Work arrangements"
+            options={WORK_ARRANGEMENT_OPTIONS}
+            selectedIds={workArrangements}
+            onChange={setWorkArrangements}
+            placeholder="Select arrangements"
+          />
+          <TextField
+            label="Compensation expectations"
+            size="small"
+            value={compensation}
+            onChange={(e) => setCompensation(e.target.value)}
+            placeholder="$180k+ base, open to equity"
+          />
+          <ProfileMultiSelect
+            label="Preferred company sizes"
+            options={COMPANY_SIZE_OPTIONS}
+            selectedIds={companySizes}
+            onChange={setCompanySizes}
+            placeholder="Select company sizes"
+          />
+          <TextField
+            label="Availability notes"
+            size="small"
+            multiline
+            minRows={2}
+            value={availabilityNotes}
+            onChange={(e) => setAvailabilityNotes(e.target.value)}
+            placeholder="Prefer mornings; not available Fridays"
+            helperText="Fallback when Calendar is not connected"
+          />
+          <Button variant="contained" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving..." : "Save profile"}
+          </Button>
+        </Box>
+      )}
+    </Paper>
+  );
+}
+
 function HowItWorksSection() {
   const steps = [
     { num: 1, title: "Connect Gmail", desc: "Authorize read access so the app can scan your inbox." },
@@ -506,6 +740,7 @@ export default function SettingsPage() {
       </Box>
       <GmailSection />
       <LlmKeySection />
+      <JobSeekerProfileSection />
       <HowItWorksSection />
     </Box>
   );

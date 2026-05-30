@@ -86,6 +86,14 @@ export function mergeJobs(targetJobId, sourceJobIds) {
   });
 }
 
+export function importEmailLink({ email_url, job_id, company, role }) {
+  const body = { email_url };
+  if (job_id) body.job_id = job_id;
+  if (company) body.company = company;
+  if (role) body.role = role;
+  return request("/jobs/import-email-link", { method: "POST", body });
+}
+
 export function fetchAlerts({ limit = 50, offset = 0 } = {}) {
   return request("/alerts", { params: { limit, offset } });
 }
@@ -210,6 +218,14 @@ export function checkGmailTokenHealth() {
 
 export function disconnectEmailAccount(accountId) {
   return request(`/email-accounts/${accountId}/disconnect`, { method: "POST" });
+}
+
+export function getUserProfile() {
+  return request("/user/profile");
+}
+
+export function updateUserProfile(body) {
+  return request("/user/profile", { method: "PATCH", body });
 }
 
 export function checkLlmKey(provider = "openai") {

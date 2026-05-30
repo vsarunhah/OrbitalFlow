@@ -32,6 +32,13 @@ const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACH_FILES = 15;
 const UNRESOLVED_AVAILABILITY_MARKERS = ["[availability]", "{{AVAILABILITY}}"];
 
+const VARIANT_LABELS = {
+  concise: "Concise",
+  warm: "Warm",
+  enthusiastic: "Enthusiastic",
+  reject: "Decline",
+};
+
 /** Inclusive calendar-day count for the default Free from / Free through range (one week). */
 const DEFAULT_AVAILABILITY_RANGE_DAYS = 7;
 
@@ -490,7 +497,7 @@ export default function ReplyDrawer({
                 <Chip
                   key={v.variant_id}
                   size="small"
-                  label={v.variant_id.charAt(0).toUpperCase() + v.variant_id.slice(1)}
+                  label={VARIANT_LABELS[v.variant_id] || v.variant_id}
                   onClick={() => selectVariant(v)}
                   color={selectedVariantId === v.variant_id ? "primary" : "default"}
                   variant={selectedVariantId === v.variant_id ? "filled" : "outlined"}

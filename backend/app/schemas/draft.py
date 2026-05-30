@@ -45,7 +45,7 @@ class FollowUpSuggestionResponse(BaseModel):
 
 
 class ReplyVariantSchema(BaseModel):
-    """One reply variant (concise / warm / enthusiastic)."""
+    """One reply variant (concise / warm / enthusiastic / reject)."""
     variant_id: str
     tone: str
     subject: str

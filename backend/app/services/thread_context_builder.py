@@ -12,9 +12,13 @@ from app.llm.prompts import strip_quoted_replies
 from app.models.contact import Contact, JobContact
 from app.models.job import Job, JobThread
 from app.models.message import Message
+from app.models.user import User
+from app.services.user_profile import get_or_create_profile, profile_summary_for_prompt
 
-THREAD_CONTEXT_MAX_MESSAGES = 8
-THREAD_MESSAGE_BODY_MAX_CHARS = 800
+# Include every message in the thread; cap total body text for LLM context size.
+THREAD_MESSAGE_BODY_MAX_CHARS = 1200
+THREAD_MESSAGE_BODY_MIN_CHARS = 100
+THREAD_TOTAL_BODY_BUDGET_CHARS = 32_000
 
 
 @dataclass
@@ -34,6 +38,8 @@ class ReplyContext:
     job_stage: str
     recipient_info: str
     user_name: str
+    user_timezone: str | None
+    user_profile_summary: str
     tone: str
     user_instruction: str | None
 
@@ -68,23 +74,65 @@ def _resolve_thread_id(
     return thread_ids[0] if thread_ids else None
 
 
-def _last_n_messages(
+def _all_messages_in_thread(
     db: Session,
     tenant_id: uuid.UUID,
     thread_id: str,
-    n: int,
 ) -> list[Message]:
-    """Return last n messages in thread, chronological order (oldest to newest)."""
-    all_in_thread = (
+    """Return all messages in thread, chronological order (oldest to newest)."""
+    return (
         db.query(Message)
         .filter(
             Message.tenant_id == tenant_id,
             Message.thread_id == thread_id,
         )
-        .order_by(Message.date_header.asc().nullslast())
+        .order_by(Message.date_header.asc().nullslast(), Message.id.asc())
         .all()
     )
-    return all_in_thread[-n:] if len(all_in_thread) > n else all_in_thread
+
+
+def _truncate_body(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 0:
+        return "(no body)"
+    suffix = "\n[...truncated...]"
+    keep = max(0, max_chars - len(suffix))
+    return text[:keep] + suffix if keep else "(no body)"
+
+
+def _allocate_message_bodies(bodies: list[str]) -> list[str]:
+    """
+    Fit all thread bodies into THREAD_TOTAL_BODY_BUDGET_CHARS.
+    Newer messages (end of list) keep more content when trimming is required.
+    """
+    if not bodies:
+        return []
+    n = len(bodies)
+    per_msg_cap = [THREAD_MESSAGE_BODY_MAX_CHARS] * n
+    if sum(min(len(b), per_msg_cap[i]) for i, b in enumerate(bodies)) <= THREAD_TOTAL_BODY_BUDGET_CHARS:
+        return [_truncate_body(b, per_msg_cap[i]) for i, b in enumerate(bodies)]
+
+    allocated = [0] * n
+    budget = THREAD_TOTAL_BODY_BUDGET_CHARS
+    for i in range(n - 1, -1, -1):
+        if budget <= 0:
+            break
+        want = min(len(bodies[i]), THREAD_MESSAGE_BODY_MAX_CHARS)
+        take = min(want, budget)
+        if take < THREAD_MESSAGE_BODY_MIN_CHARS and len(bodies[i]) > 0:
+            take = min(len(bodies[i]), THREAD_MESSAGE_BODY_MIN_CHARS, budget)
+        allocated[i] = take
+        budget -= take
+
+    for i in range(n):
+        if allocated[i] <= 0 and bodies[i].strip():
+            allocated[i] = min(
+                len(bodies[i]),
+                THREAD_MESSAGE_BODY_MIN_CHARS,
+                THREAD_TOTAL_BODY_BUDGET_CHARS,
+            )
+    return [_truncate_body(bodies[i], allocated[i]) for i in range(n)]
 
 
 def _format_timestamp(dt: datetime | None) -> str:
@@ -101,9 +149,10 @@ def build_reply_context(
     tone: str,
     user_instruction: str | None,
     user_email: str | None,
+    user_id: uuid.UUID | None = None,
 ) -> ReplyContext:
     """
-    Build structured context for reply generation: thread (last N messages),
+    Build structured context for reply generation: full thread (all messages),
     job, recipient info, user name (email), tone, user instruction.
     """
     job = db.query(Job).filter(Job.id == job_id, Job.tenant_id == tenant_id).first()
@@ -113,19 +162,18 @@ def build_reply_context(
     thread_id = _resolve_thread_id(db, tenant_id, job_id, source_message_id)
     thread_messages: list[ThreadMessageEntry] = []
     if thread_id:
-        messages = _last_n_messages(
-            db, tenant_id, thread_id, THREAD_CONTEXT_MAX_MESSAGES
-        )
-        for msg in messages:
-            raw = (msg.body_text or "").strip()
-            body = strip_quoted_replies(raw)
-            if len(body) > THREAD_MESSAGE_BODY_MAX_CHARS:
-                body = body[:THREAD_MESSAGE_BODY_MAX_CHARS] + "\n[...truncated...]"
+        messages = _all_messages_in_thread(db, tenant_id, thread_id)
+        stripped_bodies = [
+            strip_quoted_replies((msg.body_text or "").strip()) or "(no body)"
+            for msg in messages
+        ]
+        allocated_bodies = _allocate_message_bodies(stripped_bodies)
+        for msg, body in zip(messages, allocated_bodies, strict=True):
             thread_messages.append(
                 ThreadMessageEntry(
                     sender=msg.from_address or "(unknown)",
                     timestamp=_format_timestamp(msg.date_header),
-                    body_text=body or "(no body)",
+                    body_text=body,
                 )
             )
 
@@ -148,7 +196,21 @@ def build_reply_context(
         else "Recipient not specified (use thread To/From)."
     )
 
-    user_name = (user_email or "User").strip() or "User"
+    user = None
+    profile = None
+    if user_id:
+        user = (
+            db.query(User)
+            .filter(User.id == user_id, User.tenant_id == tenant_id)
+            .first()
+        )
+        profile = get_or_create_profile(db, user_id, tenant_id)
+
+    display = (profile.display_name if profile else None) or (user_email or "User")
+    user_name = display.strip() or "User"
+    user_timezone = profile.timezone if profile else None
+    user_profile_summary = profile_summary_for_prompt(profile, user)
+
     tone_normalized = (tone or "professional").lower().strip()
     if tone_normalized not in (
         "professional",
@@ -166,6 +228,8 @@ def build_reply_context(
         job_stage=job.current_stage,
         recipient_info=recipient_info,
         user_name=user_name,
+        user_timezone=user_timezone,
+        user_profile_summary=user_profile_summary,
         tone=tone_normalized,
         user_instruction=user_instruction.strip() if user_instruction else None,
     )

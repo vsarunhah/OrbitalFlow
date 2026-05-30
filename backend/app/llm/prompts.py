@@ -148,23 +148,48 @@ def build_followup_user_content(context: dict) -> str:
     return "\n".join(parts)
 
 
-# Multi-variant: one call returns 3 variants (concise, warm, enthusiastic)
-REPLY_MULTI_VARIANT_SYSTEM_PROMPT = """\
-You are an assistant that drafts email replies for job-seeker correspondence. You will be given a thread summary, job context, and recipient info. You must output exactly THREE reply variants in one JSON object.
+REPLY_AGENT_SYSTEM_PROMPT = """\
+You are an assistant that drafts email replies for job-seeker correspondence. You have tools to load the user's job-search profile (locations, compensation, company size preferences) and real Google Calendar availability.
 
-Output ONLY a JSON object with a single key "variants" whose value is an array of exactly 3 objects. Each object must have:
-- "variant_id": one of "concise", "warm", "enthusiastic" (use these exact strings; one per variant).
+Workflow:
+1. Read the thread and user instruction.
+2. If scheduling or availability is relevant, call get_calendar_availability (use the user's timezone from profile when possible).
+3. If you need compensation, location, or company-size context, call get_user_profile.
+4. When you have enough context, stop calling tools and wait for the final instruction to output JSON variants.
+
+Safety:
+- Do NOT invent facts. Use tool results for availability and preferences.
+- You may propose specific times only when get_calendar_availability returns slots, or when the user instruction or profile availability_notes provide them.
+- If calendar is not connected and no times are given, use a neutral placeholder like [availability] in the body OR ask them to suggest times—do not fabricate dates.
+- Respect location and compensation preferences when declining or negotiating (only when relevant to the thread).
+- Keep each variant appropriate to its tone: concise, warm, enthusiastic, reject.
+- The "reject" variant politely declines an interview, offer, or opportunity (use profile preferences only when relevant; never accept or schedule in reject).
+"""
+
+REPLY_AGENT_FINAL_USER_INSTRUCTION = """\
+Now output ONLY a JSON object with key "variants": an array of exactly 4 objects ordered concise, warm, enthusiastic, reject.
+Each object: variant_id, tone, subject, body (plain text with \\n for paragraphs), confidence (0-1).
+Use string variant_id values exactly: "concise", "warm", "enthusiastic", "reject" (not numbers).
+Do not call any more tools. No markdown fences."""
+
+# Multi-variant: one call returns 4 variants (concise, warm, enthusiastic, reject)
+REPLY_MULTI_VARIANT_SYSTEM_PROMPT = """\
+You are an assistant that drafts email replies for job-seeker correspondence. You will be given the full email thread (all messages), job context, and recipient info. You must output exactly FOUR reply variants in one JSON object.
+
+Output ONLY a JSON object with a single key "variants" whose value is an array of exactly 4 objects. Each object must have:
+- "variant_id": one of "concise", "warm", "enthusiastic", "reject" (use these exact strings; one per variant).
 - "tone": same as variant_id.
 - "subject": string (subject line for that variant).
 - "body": string (plain text body, no HTML or markdown).
 - "confidence": number between 0 and 1.
 
-Order the array as: concise first, then warm, then enthusiastic.
+Order the array as: concise first, then warm, then enthusiastic, then reject.
 
 Safety rules:
 - Do NOT invent facts: no fake dates, times, names, or commitments unless explicitly in context or user instruction.
 - Do NOT promise availability or specific times unless explicitly given.
-- Keep each reply appropriate to its tone: concise = short and direct; warm = friendly and personable; enthusiastic = positive and eager.
+- concise = short and direct; warm = friendly and personable; enthusiastic = positive and eager.
+- reject = polite, professional decline (pass on interview, offer, or role). Thank them; be respectful; do not accept, schedule, or express interest. You may briefly cite location/comp/fit from profile if relevant. Do not burn bridges or be rude.
 
 Rules:
 - Do NOT change the email subject; it is preserved from the thread. Output a placeholder if required—the system will use the thread subject.
@@ -178,7 +203,9 @@ def build_reply_multi_variant_user_content(context: dict) -> str:
     parts: list[str] = []
     thread_messages = context.get("thread_messages") or []
     if thread_messages:
-        parts.append("Thread summary — recent messages in this thread (chronological):")
+        parts.append(
+            f"Full thread — all {len(thread_messages)} messages in chronological order:"
+        )
         for i, m in enumerate(thread_messages, 1):
             sender = m.get("sender", "(unknown)")
             timestamp = m.get("timestamp", "(no date)")
@@ -197,17 +224,19 @@ def build_reply_multi_variant_user_content(context: dict) -> str:
     parts.append(f"Recipient:\n{context.get('recipient_info') or 'Recipient not specified.'}")
     parts.append("")
     parts.append(f"User: {context.get('user_name') or 'User'}")
+    if context.get("user_profile_summary"):
+        parts.append(context["user_profile_summary"])
     if context.get("user_instruction"):
         parts.append(f"User instruction (follow this): {context['user_instruction']}")
     parts.append("")
     parts.append(
-        "Generate exactly three reply variants: one concise, one warm, one enthusiastic. "
+        "Generate exactly four reply variants: concise, warm, enthusiastic, and reject (polite decline). "
         "Do not invent facts. Do not promise specific times unless given. "
         "Format each body like a proper email: greeting on its own line, paragraphs separated by blank lines, "
         "sign-off (e.g. Best,) on its own line and name on the next. Use newlines in the body string; do not use one long paragraph."
     )
     parts.append(
-        "Return only valid JSON: one object with key \"variants\" and value an array of 3 objects, "
+        "Return only valid JSON: one object with key \"variants\" and value an array of 4 objects, "
         "each with variant_id, tone, subject, body, confidence (number 0-1)."
     )
     return "\n".join(parts)
@@ -246,7 +275,9 @@ def build_reply_user_content_from_context(context: dict) -> str:
     # Thread summary (chronological)
     thread_messages = context.get("thread_messages") or []
     if thread_messages:
-        parts.append("Thread summary — recent messages in this thread (chronological):")
+        parts.append(
+            f"Full thread — all {len(thread_messages)} messages in chronological order:"
+        )
         for i, m in enumerate(thread_messages, 1):
             sender = m.get("sender", "(unknown)")
             timestamp = m.get("timestamp", "(no date)")

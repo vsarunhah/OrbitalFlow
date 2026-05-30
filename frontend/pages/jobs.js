@@ -12,6 +12,7 @@ import {
   updateJob,
   deleteJob,
   mergeJobs,
+  importEmailLink,
   getDraftForJob,
   setJobTimelineReadState,
   generateFollowUpSuggestion,
@@ -25,6 +26,7 @@ import JobHeader from "../components/jobs/JobHeader";
 import Thread from "../components/jobs/Thread";
 import ReplyDrawer from "../components/jobs/ReplyDrawer";
 import MergeJobsDialog from "../components/jobs/MergeJobsDialog";
+import ImportEmailDialog from "../components/jobs/ImportEmailDialog";
 import SuggestMergesDialog from "../components/jobs/SuggestMergesDialog";
 import ShortcutsDialog from "../components/jobs/ShortcutsDialog";
 import useKeyboardShortcuts from "../components/jobs/useKeyboardShortcuts";
@@ -103,6 +105,8 @@ export default function JobsPage() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [suggestMergesOpen, setSuggestMergesOpen] = useState(false);
   const [suggestMergeGroups, setSuggestMergeGroups] = useState([]);
+  const [importEmailOpen, setImportEmailOpen] = useState(false);
+  const [importEmailSubmitting, setImportEmailSubmitting] = useState(false);
 
   const visibleJobs = useMemo(() => {
     const filteredByView = applyViewFilter(jobs, view);
@@ -429,6 +433,24 @@ export default function JobsPage() {
     [refreshJobList]
   );
 
+  const handleImportEmailLink = useCallback(
+    async (payload) => {
+      setImportEmailSubmitting(true);
+      try {
+        const result = await importEmailLink(payload);
+        setImportEmailOpen(false);
+        setSelectedJobId(result.job_id);
+        await refreshJobList();
+        scrollJobListItemIntoView(result.job_id);
+        const tl = await fetchTimeline(result.job_id);
+        setTimeline(tl);
+      } finally {
+        setImportEmailSubmitting(false);
+      }
+    },
+    [refreshJobList]
+  );
+
   // --- keyboard --------------------------------------------------------
   const moveSelection = useCallback(
     (delta) => {
@@ -454,6 +476,7 @@ export default function JobsPage() {
       !replyOpen &&
       !deleteConfirmJob &&
       !showMergeModal &&
+      !importEmailOpen &&
       !shortcutsOpen &&
       !suggestMergesOpen,
     onFocusSearch: () => searchInputRef.current?.focus(),
@@ -590,6 +613,7 @@ export default function JobsPage() {
             onCompactChange={setCompact}
             onEnterMergeMode={() => setMergeMode(true)}
             onSuggestMerges={openSuggestMerges}
+            onImportEmailLink={() => setImportEmailOpen(true)}
             onShowShortcuts={() => setShortcutsOpen(true)}
           />
 
@@ -717,6 +741,15 @@ export default function JobsPage() {
           selectedIds={Array.from(mergeSelectedIds)}
           onClose={() => !mergeSubmitting && setShowMergeModal(false)}
           onConfirm={handleMergeConfirm}
+        />
+      ) : null}
+
+      {importEmailOpen ? (
+        <ImportEmailDialog
+          jobs={jobs}
+          submitting={importEmailSubmitting}
+          onClose={() => !importEmailSubmitting && setImportEmailOpen(false)}
+          onConfirm={handleImportEmailLink}
         />
       ) : null}
 

@@ -57,7 +57,7 @@ def create_draft_reply_for_job(
     job_id: uuid.UUID,
     body: DraftReplyRequest,
 ) -> DraftReplyResponse:
-    """Generate 3 reply variants, persist one draft (from first variant), return draft + variants."""
+    """Generate 4 reply variants, persist one draft (from first variant), return draft + variants."""
     from fastapi import HTTPException, status
 
     job = (
@@ -89,6 +89,7 @@ def create_draft_reply_for_job(
             source_message_id=body.source_message_id,
             user_instruction=body.user_instruction,
             user_email=user_email,
+            user_id=auth.user_id,
         )
     except ValueError as e:
         raise HTTPException(

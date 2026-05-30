@@ -325,3 +325,23 @@ def _extract_body(payload: dict) -> tuple[str | None, str | None]:
         "\n".join(text_parts) if text_parts else None,
         "\n".join(html_parts) if html_parts else None,
     )
+
+
+def list_thread_message_ids(
+    account: EmailAccount,
+    thread_id: str,
+    db_session=None,
+) -> list[str]:
+    """Return Gmail message ids for every message in a thread."""
+    creds = _get_credentials(account)
+    access_token = _ensure_valid_token(account, creds, db_session)
+
+    resp = httpx.get(
+        f"{GMAIL_API_BASE}/threads/{thread_id}",
+        params={"format": "minimal"},
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return [m["id"] for m in data.get("messages", []) if m.get("id")]

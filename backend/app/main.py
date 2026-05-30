@@ -4,8 +4,27 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+import logging
+import sys
+
 from app.config import settings
-from app.routers import alerts, analytics, auth, calendar, drafts, email_accounts, jobs, llm_keys, merge_suggestions, recruiters, resumes, tenant_settings
+from app.routers import alerts, analytics, auth, calendar, drafts, email_accounts, jobs, llm_keys, merge_suggestions, recruiters, resumes, tenant_settings, user_profile
+
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    """Ensure app loggers emit to stdout (uvicorn alone only formats access lines)."""
+    level = logging.DEBUG if settings.debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+
+
+_configure_logging()
 
 # CORS settings used by middleware and by exception handlers (so error responses get CORS too)
 CORS_ORIGINS = ["http://localhost:3000"]
@@ -28,8 +47,23 @@ def response_with_cors(response: JSONResponse) -> JSONResponse:
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    detail = exc.detail
+    if exc.status_code >= 500:
+        logger.error(
+            "HTTP %s %s -> %s",
+            request.method,
+            request.url.path,
+            detail,
+        )
+    elif exc.status_code >= 400:
+        logger.warning(
+            "HTTP %s %s -> %s",
+            request.method,
+            request.url.path,
+            detail,
+        )
     return response_with_cors(
-        JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        JSONResponse(status_code=exc.status_code, content={"detail": detail})
     )
 
 
@@ -42,8 +76,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    import logging
-    logging.getLogger("uvicorn.error").exception("Unhandled exception")
+    logger.exception(
+        "Unhandled exception on %s %s",
+        request.method,
+        request.url.path,
+    )
     detail = "Internal server error"
     if settings.debug:
         detail = f"{detail}: {type(exc).__name__}: {exc}"
@@ -61,6 +98,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(user_profile.router)
 app.include_router(llm_keys.router)
 app.include_router(email_accounts.router)
 app.include_router(calendar.router)

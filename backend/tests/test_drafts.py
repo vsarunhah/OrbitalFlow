@@ -98,8 +98,8 @@ def _create_contact_for_job(db_session, tenant_id, job_id, email="recruiter@acme
     return contact
 
 
-def _three_variants():
-    """Return 3 variants for mocking generate_reply_variants."""
+def _reply_variants():
+    """Return 4 variants for mocking generate_reply_variants."""
     return [
         ReplyVariantSchema(
             variant_id="concise",
@@ -122,7 +122,14 @@ def _three_variants():
             body="I am very excited and would love to schedule a call at your convenience!",
             confidence=0.88,
         ),
-    ], {"job_id": "x"}
+        ReplyVariantSchema(
+            variant_id="reject",
+            tone="reject",
+            subject="Re: Role at Acme",
+            body="Thank you for thinking of me. I will pass on this opportunity at this time.",
+            confidence=0.9,
+        ),
+    ]
 
 
 @pytest.fixture()
@@ -140,7 +147,7 @@ class TestDraftReplyCreate:
 
     @patch("app.routers.drafts.generate_reply_variants")
     def test_create_draft_reply_success(self, mock_generate, client, auth_header, db_session):
-        mock_generate.return_value = _three_variants()
+        mock_generate.return_value = (_reply_variants(), {"job_stage": "APPLIED"})
         r = client.get("/auth/me", headers=auth_header)
         tenant_id = uuid.UUID(r.json()["tenant_id"])
         user_id = uuid.UUID(r.json()["user_id"])
@@ -163,7 +170,7 @@ class TestDraftReplyCreate:
         assert draft_data["status"] == "GENERATED"
         assert draft_data["job_id"] == str(job.id)
         assert draft_data["account_id"] == str(account.id)
-        assert len(data["variants"]) == 3
+        assert len(data["variants"]) == 4
         assert data["variants"][0]["variant_id"] == "concise"
 
         draft = db_session.query(MessageDraft).filter(MessageDraft.job_id == job.id).first()
@@ -173,7 +180,7 @@ class TestDraftReplyCreate:
 
     @patch("app.routers.drafts.generate_reply_variants")
     def test_create_draft_reply_no_account_400(self, mock_generate, client, auth_header, db_session):
-        mock_generate.return_value = _three_variants()
+        mock_generate.return_value = (_reply_variants(), {"job_stage": "APPLIED"})
         r = client.get("/auth/me", headers=auth_header)
         tenant_id = uuid.UUID(r.json()["tenant_id"])
         user_id = uuid.UUID(r.json()["user_id"])
@@ -200,7 +207,7 @@ class TestDraftGetPatch:
 
     @patch("app.routers.drafts.generate_reply_variants")
     def test_get_and_patch_draft(self, mock_generate, client, auth_header, db_session):
-        mock_generate.return_value = _three_variants()
+        mock_generate.return_value = (_reply_variants(), {"job_stage": "APPLIED"})
         r = client.get("/auth/me", headers=auth_header)
         tenant_id = uuid.UUID(r.json()["tenant_id"])
         user_id = uuid.UUID(r.json()["user_id"])
@@ -220,7 +227,7 @@ class TestDraftGetPatch:
         assert get_resp.status_code == 200
         assert get_resp.json()["subject"] == "Re: Role at Acme"
         assert get_resp.json().get("variants") is not None
-        assert len(get_resp.json()["variants"]) == 3
+        assert len(get_resp.json()["variants"]) == 4
 
         patch_resp = client.patch(
             f"/drafts/{draft_id}",
@@ -238,7 +245,7 @@ class TestClearJobDrafts:
 
     @patch("app.routers.drafts.generate_reply_variants")
     def test_clear_unsent_drafts_keeps_sent(self, mock_generate, client, auth_header, db_session):
-        mock_generate.return_value = _three_variants()
+        mock_generate.return_value = (_reply_variants(), {"job_stage": "APPLIED"})
         r = client.get("/auth/me", headers=auth_header)
         tenant_id = uuid.UUID(r.json()["tenant_id"])
         user_id = uuid.UUID(r.json()["user_id"])
@@ -294,7 +301,7 @@ class TestDraftSend:
     @patch("app.routers.drafts.GmailProvider")
     @patch("app.routers.drafts.generate_reply_variants")
     def test_send_draft_success(self, mock_generate, mock_gmail_cls, client, auth_header, db_session):
-        mock_generate.return_value = _three_variants()
+        mock_generate.return_value = (_reply_variants(), {"job_stage": "APPLIED"})
         mock_provider = mock_gmail_cls.return_value
         mock_provider.send_message.return_value = SendResult(
             provider_message_id="gmail-msg-1",
@@ -338,7 +345,7 @@ class TestDraftSend:
 
     @patch("app.routers.drafts.generate_reply_variants")
     def test_send_draft_already_sent_400(self, mock_generate, client, auth_header, db_session):
-        mock_generate.return_value = _three_variants()
+        mock_generate.return_value = (_reply_variants(), {"job_stage": "APPLIED"})
         r = client.get("/auth/me", headers=auth_header)
         tenant_id = uuid.UUID(r.json()["tenant_id"])
         user_id = uuid.UUID(r.json()["user_id"])
@@ -366,7 +373,7 @@ class TestDraftSend:
 
     @patch("app.routers.drafts.generate_reply_variants")
     def test_get_draft_recipients_reply_all(self, mock_generate, client, auth_header, db_session):
-        mock_generate.return_value = _three_variants()
+        mock_generate.return_value = (_reply_variants(), {"job_stage": "APPLIED"})
         r = client.get("/auth/me", headers=auth_header)
         tenant_id = uuid.UUID(r.json()["tenant_id"])
         user_id = uuid.UUID(r.json()["user_id"])
@@ -393,7 +400,7 @@ class TestDraftSend:
     @patch("app.routers.drafts.GmailProvider")
     @patch("app.routers.drafts.generate_reply_variants")
     def test_send_draft_with_recipient_override(self, mock_generate, mock_gmail_cls, client, auth_header, db_session):
-        mock_generate.return_value = _three_variants()
+        mock_generate.return_value = (_reply_variants(), {"job_stage": "APPLIED"})
         mock_gmail_cls.return_value.send_message.return_value = SendResult(
             provider_message_id="override-1", thread_id="thread-123",
         )
@@ -428,7 +435,7 @@ class TestDraftSend:
     def test_send_draft_with_attachments_multipart(
         self, mock_generate, mock_gmail_cls, client, auth_header, db_session
     ):
-        mock_generate.return_value = _three_variants()
+        mock_generate.return_value = (_reply_variants(), {"job_stage": "APPLIED"})
         mock_gmail_cls.return_value.send_message.return_value = SendResult(
             provider_message_id="gmail-msg-att",
             thread_id="thread-123",
@@ -741,7 +748,7 @@ class TestReplyGenerationService:
         )
         call_kw = mock_llm.chat_json.call_args[1]
         user_content = call_kw.get("user_content") or ""
-        assert "Thread summary" in user_content or "recent messages" in user_content.lower()
+        assert "Full thread" in user_content
         assert "recruiter@acme.com" in user_content or "Would you like" in user_content
         assert "Acme" in user_content and "APPLIED" in user_content
 
@@ -750,7 +757,7 @@ class TestGenerateReplyVariants:
     """Unit tests for multi-variant reply generation."""
 
     @patch("app.services.reply_generation.get_llm_client")
-    def test_generate_reply_variants_returns_three(self, mock_get_client, db_session):
+    def test_generate_reply_variants_returns_four(self, mock_get_client, db_session):
         from app.models.tenant import Tenant
 
         tenant = Tenant(name="T")
@@ -764,17 +771,30 @@ class TestGenerateReplyVariants:
         )
         db_session.commit()
 
-        from app.llm.base import LlmResponse
+        from app.llm.base import LlmAssistantMessage
+        from app.models.user import User
+
+        user = User(
+            tenant_id=tenant.id,
+            email="test@example.com",
+            password_hash="hashed",
+        )
+        db_session.add(user)
+        db_session.commit()
 
         raw = json.dumps({
             "variants": [
                 {"variant_id": "concise", "tone": "concise", "subject": "Re: Hi", "body": "Short reply.", "confidence": 0.9},
                 {"variant_id": "warm", "tone": "warm", "subject": "Re: Hi", "body": "Thanks so much!", "confidence": 0.85},
                 {"variant_id": "enthusiastic", "tone": "enthusiastic", "subject": "Re: Hi", "body": "I am very excited!", "confidence": 0.88},
+                {"variant_id": "reject", "tone": "reject", "subject": "Re: Hi", "body": "Thank you, but I will pass.", "confidence": 0.9},
             ]
         })
         mock_llm = MagicMock()
-        mock_llm.chat_json.return_value = LlmResponse(raw_text=raw)
+        mock_llm.chat_with_messages.side_effect = [
+            LlmAssistantMessage(content=None, tool_calls=[]),
+            LlmAssistantMessage(content=raw, tool_calls=[]),
+        ]
         mock_get_client.return_value = mock_llm
 
         from app.services.reply_generation import generate_reply_variants
@@ -784,13 +804,87 @@ class TestGenerateReplyVariants:
             source_message_id=None,
             user_instruction=None,
             user_email="test@example.com",
+            user_id=user.id,
         )
-        assert len(variants) == 3
+        assert len(variants) == 4
         assert variants[0].variant_id == "concise"
         assert variants[0].body == "Short reply."
         assert variants[1].variant_id == "warm"
         assert variants[2].variant_id == "enthusiastic"
+        assert variants[3].variant_id == "reject"
         assert context["job_stage"] == "APPLIED"
+        assert context.get("agentic") is True
+
+    @patch("app.services.reply_generation.get_llm_client")
+    def test_generate_reply_variants_accepts_numeric_variant_ids(
+        self, mock_get_client, db_session
+    ):
+        from app.models.tenant import Tenant
+
+        tenant = Tenant(name="T")
+        db_session.add(tenant)
+        db_session.flush()
+        job = Job(tenant_id=tenant.id, company="Acme", role="SWE", current_stage="APPLIED")
+        db_session.add(job)
+        db_session.flush()
+        db_session.add(
+            LlmKey(tenant_id=tenant.id, provider="openai", encrypted_key=encrypt("sk-fake")),
+        )
+        db_session.commit()
+
+        from app.llm.base import LlmAssistantMessage
+        from app.models.user import User
+
+        user = User(
+            tenant_id=tenant.id,
+            email="test@example.com",
+            password_hash="hashed",
+        )
+        db_session.add(user)
+        db_session.commit()
+
+        raw = json.dumps({
+            "variants": [
+                {"variant_id": 1, "tone": 1, "subject": "Re: Hi", "body": "Short reply.", "confidence": 0.9},
+                {"variant_id": "2", "tone": "2", "subject": "Re: Hi", "body": "Thanks so much!", "confidence": 0.85},
+                {"variant_id": 3, "tone": "enthusiastic", "subject": "Re: Hi", "body": "I am very excited!", "confidence": 0.88},
+                {"variant_id": "4", "tone": "reject", "subject": "Re: Hi", "body": "Thank you, but I will pass.", "confidence": 0.9},
+            ]
+        })
+        mock_llm = MagicMock()
+        mock_llm.chat_with_messages.side_effect = [
+            LlmAssistantMessage(content=None, tool_calls=[]),
+            LlmAssistantMessage(content=raw, tool_calls=[]),
+        ]
+        mock_get_client.return_value = mock_llm
+
+        from app.services.reply_generation import generate_reply_variants
+
+        variants, _ = generate_reply_variants(
+            db_session, tenant.id, job.id,
+            source_message_id=None,
+            user_instruction=None,
+            user_email="test@example.com",
+            user_id=user.id,
+        )
+        assert [v.variant_id for v in variants] == [
+            "concise", "warm", "enthusiastic", "reject"
+        ]
+
+
+class TestParseReplyVariants:
+    def test_parse_reply_variants_maps_numeric_ids(self):
+        from app.services.reply_generation import parse_reply_variants
+
+        variants = parse_reply_variants([
+            {"variant_id": "1", "tone": "1", "subject": "Re: Hi", "body": "A", "confidence": 0.9},
+            {"variant_id": 2, "tone": 2, "subject": "Re: Hi", "body": "B", "confidence": 0.8},
+            {"variant_id": "3", "tone": "3", "subject": "Re: Hi", "body": "C", "confidence": 0.7},
+            {"variant_id": 4, "tone": "4", "subject": "Re: Hi", "body": "D", "confidence": 0.6},
+        ])
+        assert [v.variant_id for v in variants] == [
+            "concise", "warm", "enthusiastic", "reject"
+        ]
 
 
 class TestTimelineSentMessages:

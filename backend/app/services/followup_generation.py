@@ -23,10 +23,9 @@ from app.models.contact import Contact, JobContact
 from app.models.llm_key import LlmKey
 from app.schemas.draft import DraftReplyResult
 from app.services.thread_context_builder import (
-    THREAD_CONTEXT_MAX_MESSAGES,
-    THREAD_MESSAGE_BODY_MAX_CHARS,
+    _allocate_message_bodies,
+    _all_messages_in_thread,
     _format_timestamp,
-    _last_n_messages,
     _resolve_thread_id,
 )
 
@@ -48,16 +47,17 @@ def _build_followup_context(
     now = datetime.now(timezone.utc)
 
     if thread_id:
-        messages = _last_n_messages(db, tenant_id, thread_id, THREAD_CONTEXT_MAX_MESSAGES)
-        for msg in messages:
-            raw = (msg.body_text or "").strip()
-            body = strip_quoted_replies(raw)
-            if len(body) > THREAD_MESSAGE_BODY_MAX_CHARS:
-                body = body[:THREAD_MESSAGE_BODY_MAX_CHARS] + "\n[...truncated...]"
+        messages = _all_messages_in_thread(db, tenant_id, thread_id)
+        stripped = [
+            strip_quoted_replies((msg.body_text or "").strip()) or "(no body)"
+            for msg in messages
+        ]
+        allocated = _allocate_message_bodies(stripped)
+        for msg, body in zip(messages, allocated, strict=True):
             thread_messages.append({
                 "sender": msg.from_address or "(unknown)",
                 "timestamp": _format_timestamp(msg.date_header),
-                "body_text": body or "(no body)",
+                "body_text": body,
             })
         if messages:
             last_msg = messages[-1]

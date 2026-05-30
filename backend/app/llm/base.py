@@ -8,7 +8,20 @@ Validation against pydantic is done by the caller (extraction service).
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class LlmToolCall:
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class LlmAssistantMessage:
+    content: str | None
+    tool_calls: list[LlmToolCall] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -33,6 +46,18 @@ class LlmClient(abc.ABC):
     ) -> LlmResponse:
         """Send a chat request expecting a JSON-only response."""
         ...
+
+    def chat_with_messages(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        response_format_json: bool = False,
+    ) -> LlmAssistantMessage:
+        """Multi-turn chat; optional tools. Override in providers that support tool use."""
+        raise NotImplementedError(f"{self.provider_name} does not support chat_with_messages")
 
     @property
     @abc.abstractmethod

@@ -13,8 +13,8 @@ from app.models.message import Message
 from app.models.tenant import Tenant
 from app.llm.prompts import build_reply_user_content_from_context
 from app.services.thread_context_builder import (
-    THREAD_CONTEXT_MAX_MESSAGES,
     THREAD_MESSAGE_BODY_MAX_CHARS,
+    THREAD_TOTAL_BODY_BUDGET_CHARS,
     build_reply_context,
 )
 
@@ -120,8 +120,8 @@ def test_build_context_with_thread_returns_last_n_messages_chronological(db_sess
     assert ctx.tone == "warm"
 
 
-def test_build_context_more_than_max_messages_returns_last_n(db_session):
-    """When thread has more than THREAD_CONTEXT_MAX_MESSAGES, only last N returned."""
+def test_build_context_includes_all_messages_in_thread(db_session):
+    """Every message in the thread is included (not only the last N)."""
     from app.models.email_account import EmailAccount
     from app.encryption import encrypt
     import json
@@ -141,7 +141,7 @@ def test_build_context_more_than_max_messages_returns_last_n(db_session):
     db_session.flush()
 
     base = datetime(2025, 3, 1, 12, 0, tzinfo=timezone.utc)
-    n = THREAD_CONTEXT_MAX_MESSAGES + 2
+    n = 12
     for i in range(n):
         msg = Message(
             tenant_id=tenant.id,
@@ -165,10 +165,9 @@ def test_build_context_more_than_max_messages_returns_last_n(db_session):
         user_instruction=None,
         user_email=None,
     )
-    assert len(ctx.thread_messages) == THREAD_CONTEXT_MAX_MESSAGES
-    # Last N messages: indices (n-8) through (n-1), so first is "Body 2", last is "Body 9" when n=10
-    assert ctx.thread_messages[0].body_text == "Body 2"
-    assert ctx.thread_messages[-1].body_text == f"Body {n - 1}"
+    assert len(ctx.thread_messages) == n
+    assert "Body 0" in ctx.thread_messages[0].body_text
+    assert "Body 11" in ctx.thread_messages[-1].body_text
 
 
 def test_build_context_body_truncated_per_message(db_session):
@@ -320,8 +319,8 @@ def test_build_reply_user_content_from_context_format():
         "user_instruction": None,
     }
     content = build_reply_user_content_from_context(context)
-    assert "Thread summary" in content
-    assert content.index("Thread summary") < content.index("Job:")
+    assert "Full thread" in content
+    assert content.index("Full thread") < content.index("Job:")
     assert "a@b.com" in content and "Hello" in content
     assert "Acme" in content and "INTERVIEW" in content
     assert "Do not invent facts" in content

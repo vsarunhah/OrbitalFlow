@@ -18,6 +18,7 @@ from app.models.resume import Resume
 from app.models.tenant import Tenant
 from app.models.tenant_settings import TenantSettings
 from app.models.user import User
+from app.models.user_profile import UserProfile
 
 __all__ = [
     "Contact",
@@ -41,4 +42,5 @@ __all__ = [
     "Tenant",
     "TenantSettings",
     "User",
+    "UserProfile",
 ]

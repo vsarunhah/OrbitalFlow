@@ -277,6 +277,11 @@ export async function getDraftForJob(jobId) {
   }
 }
 
+/** Delete all unsent drafts for a job. Returns { deleted_count }. */
+export function clearJobDrafts(jobId) {
+  return request(`/jobs/${jobId}/drafts`, { method: "DELETE" });
+}
+
 export function updateDraft(draftId, { subject, body_text }) {
   return request(`/drafts/${draftId}`, {
     method: "PATCH",

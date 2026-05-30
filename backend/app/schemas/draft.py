@@ -59,6 +59,11 @@ class DraftReplyResponse(BaseModel):
     variants: list[ReplyVariantSchema]
 
 
+class ClearJobDraftsResponse(BaseModel):
+    """Response for DELETE /jobs/{id}/drafts."""
+    deleted_count: int = Field(description="Number of unsent drafts removed")
+
+
 class DraftUpdate(BaseModel):
     """Request body for PATCH /drafts/{id}."""
     subject: str | None = Field(None, max_length=2000)

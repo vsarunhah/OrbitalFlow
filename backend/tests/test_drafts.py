@@ -233,6 +233,61 @@ class TestDraftGetPatch:
         assert patch_resp.json()["status"] == "EDITED"
 
 
+class TestClearJobDrafts:
+    """DELETE /jobs/{id}/drafts removes unsent drafts only."""
+
+    @patch("app.routers.drafts.generate_reply_variants")
+    def test_clear_unsent_drafts_keeps_sent(self, mock_generate, client, auth_header, db_session):
+        mock_generate.return_value = _three_variants()
+        r = client.get("/auth/me", headers=auth_header)
+        tenant_id = uuid.UUID(r.json()["tenant_id"])
+        user_id = uuid.UUID(r.json()["user_id"])
+
+        job, account, _, msg = _create_job_with_account_and_llm(db_session, tenant_id, user_id)
+        _create_contact_for_job(db_session, tenant_id, job.id)
+        db_session.commit()
+
+        first = client.post(
+            f"/jobs/{job.id}/draft-reply",
+            headers=auth_header,
+            json={"source_message_id": str(msg.id)},
+        )
+        assert first.status_code == 200
+
+        second = client.post(
+            f"/jobs/{job.id}/draft-reply",
+            headers=auth_header,
+            json={"source_message_id": str(msg.id)},
+        )
+        assert second.status_code == 200
+        sent_draft_id = uuid.UUID(first.json()["draft"]["id"])
+
+        sent_draft = db_session.query(MessageDraft).filter(MessageDraft.id == sent_draft_id).first()
+        assert sent_draft is not None
+        sent_draft.status = "SENT"
+        db_session.commit()
+
+        clear_resp = client.delete(f"/jobs/{job.id}/drafts", headers=auth_header)
+        assert clear_resp.status_code == 200
+        assert clear_resp.json()["deleted_count"] == 1
+
+        remaining = (
+            db_session.query(MessageDraft)
+            .filter(MessageDraft.job_id == job.id)
+            .all()
+        )
+        assert len(remaining) == 1
+        assert remaining[0].id == sent_draft_id
+        assert remaining[0].status == "SENT"
+
+        get_resp = client.get(f"/jobs/{job.id}/draft", headers=auth_header)
+        assert get_resp.status_code == 404
+
+    def test_clear_drafts_job_not_found(self, client, auth_header):
+        resp = client.delete(f"/jobs/{uuid.uuid4()}/drafts", headers=auth_header)
+        assert resp.status_code == 404
+
+
 class TestDraftSend:
     """POST /drafts/{id}/send with mocked Gmail send."""
 

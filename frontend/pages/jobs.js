@@ -745,6 +745,7 @@ export default function JobsPage() {
         sourceMessageSubject={sourceMessage?.subject ?? null}
         onClose={() => setReplyOpen(false)}
         onSent={handleReplySent}
+        onDraftsCleared={() => setReplyDraft(null)}
       />
 
       <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />

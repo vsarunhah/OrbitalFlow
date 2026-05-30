@@ -41,6 +41,7 @@ from app.schemas.job import (
     TimelineSentMessage,
 )
 from app.schemas.draft import (
+    ClearJobDraftsResponse,
     ComposeDraftRequest,
     DraftRecipientsResponse,
     DraftReplyRequest,
@@ -527,6 +528,34 @@ def get_job_draft(
         except (json.JSONDecodeError, Exception):
             pass
     return schema
+
+
+@router.delete("/{job_id}/drafts", response_model=ClearJobDraftsResponse)
+def clear_job_drafts(
+    job_id: uuid.UUID,
+    auth: AuthContext = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete all unsent drafts for this job. Sent drafts are kept for audit."""
+    job = (
+        db.query(Job)
+        .filter(Job.id == job_id, Job.tenant_id == auth.tenant_id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    deleted_count = (
+        db.query(MessageDraft)
+        .filter(
+            MessageDraft.job_id == job_id,
+            MessageDraft.tenant_id == auth.tenant_id,
+            MessageDraft.status != "SENT",
+        )
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return ClearJobDraftsResponse(deleted_count=deleted_count)
 
 
 @router.patch("/{job_id}", response_model=JobDetail)

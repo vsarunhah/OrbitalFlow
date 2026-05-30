@@ -14,9 +14,11 @@ import CloseIcon from "@mui/icons-material/Close";
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import SendIcon from "@mui/icons-material/Send";
 import EventAvailableIcon from "@mui/icons-material/EventAvailable";
+import ClearAllIcon from "@mui/icons-material/ClearAll";
 import {
   createDraftReply,
   createComposeDraft,
+  clearJobDrafts,
   fetchAvailabilitySlots,
   getDraftRecipients,
   getJobReplyRecipients,
@@ -77,6 +79,7 @@ export default function ReplyDrawer({
   sourceMessageSubject,
   onClose,
   onSent,
+  onDraftsCleared,
   autoSuggest = true,
 }) {
   const [draft, setDraft] = useState(null);
@@ -90,6 +93,7 @@ export default function ReplyDrawer({
   const [sending, setSending] = useState(false);
   const [saving, setSaving] = useState(false);
   const [suggesting, setSuggesting] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [error, setError] = useState(null);
   const [selectedVariantId, setSelectedVariantId] = useState(null);
   const [durationMinutes, setDurationMinutes] = useState(30);
@@ -220,6 +224,36 @@ export default function ReplyDrawer({
     setSelectedVariantId(v.variant_id);
     setBody(v.body || "");
     updateDraft(draft.id, { body_text: v.body }).catch(() => {});
+  };
+
+  const hasComposerContent =
+    Boolean(draft) ||
+    Boolean(body.trim()) ||
+    subject.trim() !== buildReplySubject(sourceMessageSubject).trim();
+
+  const handleClearDrafts = async () => {
+    if (!jobId || draft?.status === "SENT" || clearing) return;
+    if (hasComposerContent) {
+      const ok = window.confirm(
+        "Clear all unsent drafts for this job? Your current reply will be discarded."
+      );
+      if (!ok) return;
+    }
+    setClearing(true);
+    setError(null);
+    try {
+      await clearJobDrafts(jobId);
+      autoSuggestedForRef.current = jobId;
+      setDraft(null);
+      setSubject(buildReplySubject(sourceMessageSubject));
+      setBody("");
+      setSelectedVariantId(null);
+      onDraftsCleared?.();
+    } catch (err) {
+      setError(err.message || "Failed to clear drafts");
+    } finally {
+      setClearing(false);
+    }
   };
 
   const handleSave = async () => {
@@ -364,7 +398,7 @@ export default function ReplyDrawer({
             borderColor: "divider",
           }}
         >
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 0 }}>
             <Typography variant="subtitle1" fontWeight={600}>
               Reply
             </Typography>
@@ -375,9 +409,23 @@ export default function ReplyDrawer({
               </Box>
             ) : null}
           </Box>
-          <IconButton size="small" onClick={onClose} aria-label="Close">
-            <CloseIcon fontSize="small" />
-          </IconButton>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+            {jobId ? (
+              <Button
+                size="small"
+                variant="outlined"
+                color="inherit"
+                startIcon={<ClearAllIcon fontSize="small" />}
+                onClick={handleClearDrafts}
+                disabled={clearing || suggesting || sending || draft?.status === "SENT"}
+              >
+                {clearing ? "Clearing…" : "Clear drafts"}
+              </Button>
+            ) : null}
+            <IconButton size="small" onClick={onClose} aria-label="Close">
+              <CloseIcon fontSize="small" />
+            </IconButton>
+          </Box>
         </Box>
 
         <Box sx={{ flex: 1, overflowY: "auto", px: 2, py: 2 }}>

@@ -323,6 +323,7 @@ def build_user_content(
     subject: str | None,
     body_text: str | None,
     from_address: str | None = None,
+    attachment_texts: list[tuple[str, str]] | None = None,
 ) -> str:
     """Build the user message from email fields. Truncates long bodies."""
     parts: list[str] = []
@@ -334,6 +335,12 @@ def build_user_content(
     if len(body) > BODY_TRUNCATION_LIMIT:
         body = body[:BODY_TRUNCATION_LIMIT] + "\n[...truncated...]"
     parts.append(f"Body:\n{body}" if body else "Body: (empty)")
+
+    if attachment_texts:
+        att_lines = []
+        for filename, excerpt in attachment_texts:
+            att_lines.append(f"- {filename}: {excerpt}")
+        parts.append("Attachments:\n" + "\n".join(att_lines))
 
     return "\n\n".join(parts)
 

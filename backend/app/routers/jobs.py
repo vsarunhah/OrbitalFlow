@@ -9,7 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func as sa_func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import AuthContext, get_current_user
 from app.database import get_db
@@ -39,6 +39,7 @@ from app.schemas.job import (
     NextAction,
     TimelineReadStateBody,
     TimelineEvent,
+    TimelineAttachment,
     TimelineMessage,
     TimelineSentMessage,
 )
@@ -666,7 +667,11 @@ def get_timeline(
     else:
         messages_q = messages_q.filter(False)
 
-    msgs = messages_q.order_by(Message.date_header.asc().nullslast()).all()
+    msgs = (
+        messages_q.options(selectinload(Message.attachments))
+        .order_by(Message.date_header.asc().nullslast())
+        .all()
+    )
 
     def to_timeline_message(m: Message) -> TimelineMessage:
         from app.llm.prompts import strip_quoted_replies
@@ -675,6 +680,15 @@ def get_timeline(
         cleaned = strip_quoted_replies(raw) if raw else ""
         snippet = cleaned[:300] if cleaned else None
         raw_html = (m.body_html or "").strip()
+        att_list = [
+            TimelineAttachment(
+                id=a.id,
+                filename=a.filename,
+                mime_type=a.mime_type,
+                size_bytes=a.size_bytes,
+            )
+            for a in (m.attachments or [])
+        ]
         return TimelineMessage(
             id=m.id,
             subject=m.subject,
@@ -684,6 +698,7 @@ def get_timeline(
             body_snippet=snippet,
             body_html=raw_html if raw_html else None,
             provider_msg_id=m.provider_msg_id,
+            attachments=att_list,
         )
 
     job_detail = _build_job_detail(db, auth, job)

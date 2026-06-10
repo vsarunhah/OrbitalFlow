@@ -73,8 +73,14 @@ def run_extraction(db: Session, message_id: uuid.UUID, tenant_id: uuid.UUID) -> 
         db.commit()
         return extraction
 
+    from app.services.attachment_text import collect_attachment_texts_for_extraction
+
+    attachment_texts = collect_attachment_texts_for_extraction(db, message)
     user_content = build_user_content(
-        message.subject, message.body_text, message.from_address
+        message.subject,
+        message.body_text,
+        message.from_address,
+        attachment_texts=attachment_texts or None,
     )
 
     client = get_llm_client(llm_key_row.provider, api_key)

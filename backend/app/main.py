@@ -8,7 +8,22 @@ import logging
 import sys
 
 from app.config import settings
-from app.routers import alerts, analytics, auth, calendar, drafts, email_accounts, jobs, llm_keys, merge_suggestions, recruiters, resumes, tenant_settings, user_profile
+from app.routers import (
+    alerts,
+    analytics,
+    auth,
+    calendar,
+    drafts,
+    email_accounts,
+    jobs,
+    llm_keys,
+    merge_suggestions,
+    messages,
+    recruiters,
+    resumes,
+    tenant_settings,
+    user_profile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +110,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 app.include_router(auth.router)
@@ -103,6 +119,7 @@ app.include_router(llm_keys.router)
 app.include_router(email_accounts.router)
 app.include_router(calendar.router)
 app.include_router(jobs.router)
+app.include_router(messages.router)
 app.include_router(drafts.router)
 app.include_router(tenant_settings.router)
 app.include_router(alerts.router)

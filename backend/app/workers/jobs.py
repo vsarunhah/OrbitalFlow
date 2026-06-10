@@ -212,6 +212,12 @@ def process_message(account_id: str, provider_msg_id: str) -> dict:
         )
 
         db.add(msg)
+        db.flush()
+
+        from app.services.message_refresh import apply_fetched_attachments
+
+        apply_fetched_attachments(db, msg, fetched)
+
         try:
             db.commit()
         except IntegrityError:

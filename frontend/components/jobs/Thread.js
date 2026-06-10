@@ -6,11 +6,15 @@ import Link from "@mui/material/Link";
 import Collapse from "@mui/material/Collapse";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
+import Button from "@mui/material/Button";
+import CircularProgress from "@mui/material/CircularProgress";
 import LightModeOutlinedIcon from "@mui/icons-material/LightModeOutlined";
+import AttachFileOutlinedIcon from "@mui/icons-material/AttachFileOutlined";
 import { alpha } from "@mui/material/styles";
 import EmailBody from "./EmailBody";
 import StageDot from "./StageDot";
 import { parseFromAddress, stripHtmlToPlain } from "./email";
+import { downloadMessageAttachment, refreshMessage } from "../../lib/api";
 
 /**
  * Unified job thread: events + received + sent, newest first. Messages are
@@ -81,11 +85,160 @@ function fmtTime(iso) {
   });
 }
 
-function MessageRow({ item, defaultExpanded }) {
+function formatBytes(n) {
+  if (n == null || n <= 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function attachmentCollapsedLabel(attachments) {
+  if (!attachments?.length) return null;
+  if (attachments.length === 1) return attachments[0].filename;
+  return `${attachments.length} attachments`;
+}
+
+function MessageAttachments({ messageId, attachments, onRefreshed }) {
+  const [downloadingId, setDownloadingId] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleRefresh = async (e) => {
+    e.stopPropagation();
+    setError(null);
+    setRefreshing(true);
+    try {
+      await refreshMessage(messageId);
+      await onRefreshed?.();
+    } catch (err) {
+      const msg = err?.message || "Refresh failed";
+      setError(
+        msg.includes("403") || /reconnect/i.test(msg)
+          ? "Could not sync — reconnect Gmail in Settings."
+          : msg
+      );
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  if (!attachments?.length) {
+    return (
+      <Box sx={{ mt: 1.5 }} onClick={(e) => e.stopPropagation()}>
+        <Button
+          size="small"
+          variant="text"
+          disabled={refreshing}
+          onClick={handleRefresh}
+          startIcon={refreshing ? <CircularProgress size={14} /> : <AttachFileOutlinedIcon />}
+          sx={{ textTransform: "none", px: 0 }}
+        >
+          {refreshing ? "Syncing from Gmail…" : "Sync attachments from Gmail"}
+        </Button>
+        {error ? (
+          <Typography variant="caption" color="error" sx={{ display: "block", mt: 0.5 }}>
+            {error}
+          </Typography>
+        ) : null}
+      </Box>
+    );
+  }
+
+  const handleDownload = async (att, e) => {
+    e.stopPropagation();
+    setError(null);
+    setDownloadingId(att.id);
+    try {
+      await downloadMessageAttachment(messageId, att.id, att.filename);
+    } catch (err) {
+      const msg = err?.message || "Download failed";
+      setError(
+        msg.includes("403") || /reconnect/i.test(msg)
+          ? "Could not download — reconnect Gmail in Settings."
+          : msg
+      );
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  return (
+    <Box
+      sx={{ mt: 1.5, alignSelf: "flex-start", maxWidth: "100%" }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, display: "block", mb: 0.5 }}>
+        Attachments
+      </Typography>
+      {error ? (
+        <Typography variant="caption" color="error" sx={{ display: "block", mb: 0.5 }}>
+          {error}
+        </Typography>
+      ) : null}
+      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 0.25 }}>
+        {attachments.map((att) => (
+          <Box
+            key={att.id}
+            component="button"
+            type="button"
+            disabled={downloadingId === att.id}
+            onClick={(e) => handleDownload(att, e)}
+            title={att.filename}
+            sx={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 0.75,
+              width: "auto",
+              maxWidth: 320,
+              textAlign: "left",
+              border: 1,
+              borderColor: "divider",
+              bgcolor: (theme) => alpha(theme.palette.background.paper, 0.6),
+              cursor: downloadingId === att.id ? "wait" : "pointer",
+              py: 0.5,
+              px: 1,
+              borderRadius: 1,
+              color: "primary.main",
+              "&:hover": { bgcolor: (theme) => alpha(theme.palette.primary.main, 0.08) },
+              "&:disabled": { opacity: 0.6 },
+            }}
+          >
+            {downloadingId === att.id ? (
+              <CircularProgress size={14} />
+            ) : (
+              <AttachFileOutlinedIcon sx={{ fontSize: 18, flexShrink: 0 }} />
+            )}
+            <Typography
+              variant="body2"
+              sx={{
+                fontSize: 13,
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {att.filename}
+            </Typography>
+            {att.size_bytes ? (
+              <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
+                {formatBytes(att.size_bytes)}
+              </Typography>
+            ) : null}
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
+function MessageRow({ item, defaultExpanded, onMessageRefreshed }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [readingLight, setReadingLight] = useState(false);
   const isSent = item.kind === "sent";
   const d = item.data;
+  const attachments = !isSent ? d.attachments || [] : [];
+  const attLabel = !isSent ? attachmentCollapsedLabel(attachments) : null;
   const toLabel = isSent
     ? (() => {
         try {
@@ -243,6 +396,16 @@ function MessageRow({ item, defaultExpanded }) {
               {snippet}
             </Typography>
           ) : null}
+          {!expanded && attLabel ? (
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ mt: 0.5, display: "flex", alignItems: "center", gap: 0.5, fontSize: 12 }}
+            >
+              <AttachFileOutlinedIcon sx={{ fontSize: 14 }} />
+              {attLabel}
+            </Typography>
+          ) : null}
           {expanded ? (
             <Typography
               variant="body2"
@@ -293,6 +456,13 @@ function MessageRow({ item, defaultExpanded }) {
             text={d.body_text || d.body_snippet}
             readingLight={readingLight}
           />
+          {!isSent ? (
+            <MessageAttachments
+              messageId={d.id}
+              attachments={attachments}
+              onRefreshed={onMessageRefreshed}
+            />
+          ) : null}
         </Box>
       </Collapse>
     </Box>
@@ -371,7 +541,7 @@ function EventRow({ data }) {
   );
 }
 
-export default function Thread({ timeline }) {
+export default function Thread({ timeline, onMessageRefreshed }) {
   const items = useMemo(() => normalizeItems(timeline), [timeline]);
   if (!items.length) {
     return (
@@ -406,6 +576,7 @@ export default function Thread({ timeline }) {
             key={item.id}
             item={item}
             defaultExpanded={i === newestMessageIndex}
+            onMessageRefreshed={onMessageRefreshed}
           />
         )
       )}

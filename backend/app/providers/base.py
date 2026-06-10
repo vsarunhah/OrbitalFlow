@@ -38,6 +38,15 @@ class SendResult:
 
 
 @dataclass(frozen=True)
+class FetchedAttachment:
+    """Inbound attachment metadata from a fetched message (no bytes)."""
+    filename: str
+    mime_type: str | None
+    size_bytes: int | None
+    provider_attachment_id: str | None  # Gmail body.attachmentId; None if inline-only
+
+
+@dataclass(frozen=True)
 class FetchedMessage:
     """Parsed message returned by EmailProvider.fetch_message."""
     provider_msg_id: str
@@ -51,6 +60,7 @@ class FetchedMessage:
     headers_json: str
     raw_payload_json: str
     label_ids_json: str | None
+    attachments: list[FetchedAttachment] = field(default_factory=list)
 
 
 class EmailProvider(abc.ABC):

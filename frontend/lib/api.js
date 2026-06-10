@@ -450,6 +450,54 @@ export function reviewResume(resumeId) {
   return request(`/resumes/${resumeId}/review`, { method: "POST" });
 }
 
+/** Re-fetch one email from Gmail (body + attachment metadata). */
+export function refreshMessage(messageId) {
+  return request(`/messages/${messageId}/refresh`, { method: "POST" });
+}
+
+function parseContentDispositionFilename(header) {
+  if (!header) return null;
+  const star = /filename\*=(?:UTF-8'')?([^;\n]+)/i.exec(header);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim().replace(/^"(.*)"$/, "$1"));
+    } catch {
+      return star[1].trim();
+    }
+  }
+  const quoted = /filename="([^"]+)"/i.exec(header);
+  if (quoted) return quoted[1];
+  const plain = /filename=([^;\n]+)/i.exec(header);
+  if (plain) return plain[1].trim();
+  return null;
+}
+
+/** Download an inbound email attachment (per message, not per job). */
+export async function downloadMessageAttachment(messageId, attachmentId, suggestedFilename) {
+  const token = getToken();
+  const headers = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(
+    `${API}/messages/${messageId}/attachments/${attachmentId}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.detail || `HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const filename =
+    parseContentDispositionFilename(res.headers.get("Content-Disposition")) ||
+    suggestedFilename ||
+    "attachment";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 /** Download resume as PDF; returns blob and triggers browser download. */
 export async function exportResumePdf(resumeId) {
   const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";

@@ -198,6 +198,16 @@ def _ingest_messages(
             .first()
         )
         if existing:
+            from app.services.message_refresh import refresh_message_from_gmail
+
+            try:
+                refresh_message_from_gmail(db, existing, account=account)
+            except Exception:
+                logger.warning(
+                    "Refresh existing message failed provider_msg_id=%s",
+                    provider_msg_id,
+                    exc_info=True,
+                )
             messages.append(existing)
             continue
 

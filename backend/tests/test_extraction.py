@@ -874,3 +874,16 @@ def test_build_user_content_includes_from():
 
     out_no_from = build_user_content("Subj", "Body")
     assert "From: (no from)" in out_no_from
+
+
+def test_build_user_content_includes_attachment_excerpts():
+    from app.llm.prompts import build_user_content
+
+    out = build_user_content(
+        "Offer",
+        "See attached",
+        attachment_texts=[("offer.pdf", "Base salary: $150k")],
+    )
+    assert "Attachments:" in out
+    assert "offer.pdf" in out
+    assert "Base salary: $150k" in out

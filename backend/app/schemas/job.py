@@ -100,6 +100,15 @@ class TimelineEvent(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TimelineAttachment(BaseModel):
+    id: uuid.UUID
+    filename: str
+    mime_type: str | None = None
+    size_bytes: int | None = None
+
+    model_config = {"from_attributes": True}
+
+
 class TimelineMessage(BaseModel):
     id: uuid.UUID
     subject: str | None
@@ -118,6 +127,10 @@ class TimelineMessage(BaseModel):
     )
     provider_msg_id: str | None = Field(
         None, description="Gmail message ID, used to construct a link to the email"
+    )
+    attachments: list[TimelineAttachment] = Field(
+        default_factory=list,
+        description="Files attached to this email only (not job-wide)",
     )
 
     model_config = {"from_attributes": True}

@@ -12,7 +12,7 @@ from sqlalchemy import (
     func,
     types,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
@@ -81,4 +81,10 @@ class Message(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    attachments = relationship(
+        "MessageAttachment",
+        back_populates="message",
+        cascade="all, delete-orphan",
     )

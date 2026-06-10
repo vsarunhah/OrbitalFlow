@@ -13,6 +13,7 @@ from app.models.job import (
 from app.models.llm_key import LlmKey
 from app.models.merge_suggestion import JobMergeSuggestion
 from app.models.message import Message
+from app.models.message_attachment import MessageAttachment
 from app.models.message_extraction import MessageExtraction
 from app.models.resume import Resume
 from app.models.tenant import Tenant
@@ -37,6 +38,7 @@ __all__ = [
     "JobTimelineReadState",
     "LlmKey",
     "Message",
+    "MessageAttachment",
     "MessageExtraction",
     "Resume",
     "Tenant",

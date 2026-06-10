@@ -20,12 +20,18 @@ import httpx
 
 from app.encryption import decrypt, encrypt
 from app.models.email_account import EmailAccount
-from app.providers.base import EmailProvider, FetchedMessage, SendResult
+from app.providers.base import (
+    EmailProvider,
+    FetchedAttachment,
+    FetchedMessage,
+    SendResult,
+)
 
 logger = logging.getLogger(__name__)
 
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+MAX_ATTACHMENT_SIZE_BYTES = 25_000_000
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,29 @@ class GmailProvider(EmailProvider):
         raw = resp.json()
 
         return _parse_message(raw)
+
+    def fetch_attachment(
+        self,
+        account: EmailAccount,
+        message_id: str,
+        provider_attachment_id: str,
+    ) -> bytes:
+        """Fetch attachment bytes via Gmail users.messages.attachments.get."""
+        creds = _get_credentials(account)
+        access_token = _ensure_valid_token(account, creds, self._db)
+        url = (
+            f"{GMAIL_API_BASE}/messages/{message_id}/attachments/"
+            f"{provider_attachment_id}"
+        )
+        resp = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw_data = data.get("data", "")
+        return base64.urlsafe_b64decode(raw_data + "==")
 
     def send_message(
         self,
@@ -280,6 +309,7 @@ def _parse_message(raw: dict) -> FetchedMessage:
             logger.debug("Could not parse date header: %s", date_str)
 
     body_text, body_html = _extract_body(payload)
+    attachments = _extract_attachments(payload)
 
     label_ids = raw.get("labelIds")
 
@@ -295,7 +325,159 @@ def _parse_message(raw: dict) -> FetchedMessage:
         headers_json=json.dumps(headers_map),
         raw_payload_json=json.dumps(raw),
         label_ids_json=json.dumps(label_ids) if label_ids else None,
+        attachments=attachments,
     )
+
+
+def _part_headers_map(part: dict) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for h in part.get("headers", []):
+        headers[h["name"].lower()] = h["value"]
+    return headers
+
+
+def _decode_body_data(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "==")
+
+
+def _extract_attachments(payload: dict) -> list[FetchedAttachment]:
+    """Walk MIME tree and collect non-body attachment parts."""
+    results: list[FetchedAttachment] = []
+    seen: set[tuple[str | None, str]] = set()
+
+    def _walk(part: dict, parent_mime: str = "") -> None:
+        mime = part.get("mimeType", "")
+        headers = _part_headers_map(part)
+        disposition = headers.get("content-disposition", "")
+        filename = (
+            part.get("filename")
+            or headers.get("content-filename")
+            or _filename_from_disposition(disposition)
+            or _filename_from_content_type(headers.get("content-type", ""))
+        )
+        body = part.get("body", {})
+        attachment_id = body.get("attachmentId")
+        inline_data = body.get("data")
+        size = body.get("size")
+
+        if mime.startswith("multipart/"):
+            for sub in part.get("parts", []):
+                _walk(sub, mime)
+            return
+
+        if mime.startswith("message/") and part.get("parts"):
+            for sub in part.get("parts", []):
+                _walk(sub, mime)
+
+        is_body_part = mime in ("text/plain", "text/html") and (
+            parent_mime == "multipart/alternative"
+            or (not filename and "attachment" not in disposition.lower())
+        )
+        if is_body_part:
+            return
+
+        has_attachment = bool(
+            filename
+            or "attachment" in disposition.lower()
+            or (mime and not mime.startswith("multipart/") and mime not in ("text/plain", "text/html"))
+        )
+        if not has_attachment:
+            return
+
+        if not filename:
+            ext = mimetypes.guess_extension(mime.split(";")[0].strip()) or ""
+            filename = f"attachment{ext}" if ext else "attachment"
+
+        size_bytes = int(size) if size is not None else None
+        if size_bytes is not None and size_bytes > MAX_ATTACHMENT_SIZE_BYTES:
+            logger.warning(
+                "Skipping oversized attachment filename=%s size=%s",
+                filename,
+                size_bytes,
+            )
+            return
+
+        key = (attachment_id, filename)
+        if key in seen:
+            return
+        seen.add(key)
+
+        # Inline small parts may only have body.data (no attachmentId)
+        provider_id = attachment_id
+        if not provider_id and inline_data:
+            provider_id = None
+
+        results.append(
+            FetchedAttachment(
+                filename=filename,
+                mime_type=mime.split(";")[0].strip() or None,
+                size_bytes=size_bytes,
+                provider_attachment_id=provider_id,
+            )
+        )
+
+    _walk(payload)
+    return results
+
+
+def _filename_from_content_type(content_type: str) -> str | None:
+    if not content_type:
+        return None
+    for token in content_type.split(";"):
+        token = token.strip()
+        if token.lower().startswith("name="):
+            _, _, value = token.partition("=")
+            return value.strip().strip('"') or None
+    return None
+
+
+def _filename_from_disposition(disposition: str) -> str | None:
+    if not disposition:
+        return None
+    lower = disposition.lower()
+    for token in disposition.split(";"):
+        token = token.strip()
+        if token.lower().startswith("filename*="):
+            _, _, value = token.partition("=")
+            value = value.strip().strip('"')
+            if "''" in value:
+                value = value.split("''", 1)[-1]
+            return value or None
+        if token.lower().startswith("filename="):
+            _, _, value = token.partition("=")
+            return value.strip().strip('"') or None
+    if "filename" in lower:
+        return None
+    return None
+
+
+def fetch_inline_attachment_bytes(payload: dict, filename: str) -> bytes | None:
+    """Return bytes for a small inline part matching filename, if present in payload."""
+
+    def _walk(part: dict) -> bytes | None:
+        mime = part.get("mimeType", "")
+        if mime.startswith("message/") and part.get("parts"):
+            for sub in part.get("parts", []):
+                found = _walk(sub)
+                if found is not None:
+                    return found
+        headers = _part_headers_map(part)
+        disp = headers.get("content-disposition", "")
+        part_name = (
+            part.get("filename")
+            or headers.get("content-filename")
+            or _filename_from_disposition(disp)
+        )
+        body = part.get("body", {})
+        if part_name == filename and body.get("data") and not body.get("attachmentId"):
+            return _decode_body_data(body["data"])
+        for sub in part.get("parts", []):
+            found = _walk(sub)
+            if found is not None:
+                return found
+        return None
+
+    return _walk(payload)
 
 
 def _extract_body(payload: dict) -> tuple[str | None, str | None]:

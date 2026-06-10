@@ -148,12 +148,24 @@ def process_message(account_id: str, provider_msg_id: str) -> dict:
 
     db = SessionLocal()
     try:
-        existing = db.query(Message.id).filter(
-            Message.account_id == uuid.UUID(account_id),
-            Message.provider_msg_id == provider_msg_id,
-        ).first()
+        existing = (
+            db.query(Message)
+            .filter(
+                Message.account_id == uuid.UUID(account_id),
+                Message.provider_msg_id == provider_msg_id,
+            )
+            .first()
+        )
 
         if existing:
+            account = db.query(EmailAccount).filter(
+                EmailAccount.id == uuid.UUID(account_id),
+            ).first()
+            if account is not None:
+                from app.services.message_refresh import ensure_message_attachments
+
+                ensure_message_attachments(db, existing, account, allow_gmail_fetch=True)
+                db.commit()
             logger.info(
                 "Message already exists, skipping. account_id=%s provider_msg_id=%s",
                 account_id,

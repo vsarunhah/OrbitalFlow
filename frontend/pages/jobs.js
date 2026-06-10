@@ -721,17 +721,7 @@ export default function JobsPage() {
                 onGenerateFollowUp={handleGenerateFollowUp}
                 followUpBusy={generatingFollowUp}
               />
-              <Thread
-                timeline={timeline}
-                onMessageRefreshed={
-                  selectedJobId
-                    ? async () => {
-                        const tl = await fetchTimeline(selectedJobId);
-                        setTimeline(tl);
-                      }
-                    : undefined
-                }
-              />
+              <Thread timeline={timeline} />
             </>
           ) : null}
         </Box>

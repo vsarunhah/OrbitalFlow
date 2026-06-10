@@ -55,6 +55,7 @@ from app.schemas.draft import (
 )
 from app.services.followup_generation import generate_followup_suggestion
 from app.services.force_index_email import ForceIndexError, force_index_email_link
+from app.services.message_refresh import ensure_attachments_for_messages
 from app.services.job_merge import merge_job_into_target
 from app.services.job_messages import load_accounts_for_messages, load_messages_for_jobs
 from app.services.job_read_state import (
@@ -672,6 +673,11 @@ def get_timeline(
         .order_by(Message.date_header.asc().nullslast())
         .all()
     )
+
+    ensure_attachments_for_messages(db, msgs)
+
+    for m in msgs:
+        db.refresh(m, ["attachments"])
 
     def to_timeline_message(m: Message) -> TimelineMessage:
         from app.llm.prompts import strip_quoted_replies

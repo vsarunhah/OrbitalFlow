@@ -6,7 +6,6 @@ import Link from "@mui/material/Link";
 import Collapse from "@mui/material/Collapse";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
-import Button from "@mui/material/Button";
 import CircularProgress from "@mui/material/CircularProgress";
 import LightModeOutlinedIcon from "@mui/icons-material/LightModeOutlined";
 import AttachFileOutlinedIcon from "@mui/icons-material/AttachFileOutlined";
@@ -14,7 +13,7 @@ import { alpha } from "@mui/material/styles";
 import EmailBody from "./EmailBody";
 import StageDot from "./StageDot";
 import { parseFromAddress, stripHtmlToPlain } from "./email";
-import { downloadMessageAttachment, refreshMessage } from "../../lib/api";
+import { downloadMessageAttachment } from "../../lib/api";
 
 /**
  * Unified job thread: events + received + sent, newest first. Messages are
@@ -98,50 +97,12 @@ function attachmentCollapsedLabel(attachments) {
   return `${attachments.length} attachments`;
 }
 
-function MessageAttachments({ messageId, attachments, onRefreshed }) {
+function MessageAttachments({ messageId, attachments }) {
   const [downloadingId, setDownloadingId] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
 
-  const handleRefresh = async (e) => {
-    e.stopPropagation();
-    setError(null);
-    setRefreshing(true);
-    try {
-      await refreshMessage(messageId);
-      await onRefreshed?.();
-    } catch (err) {
-      const msg = err?.message || "Refresh failed";
-      setError(
-        msg.includes("403") || /reconnect/i.test(msg)
-          ? "Could not sync — reconnect Gmail in Settings."
-          : msg
-      );
-    } finally {
-      setRefreshing(false);
-    }
-  };
-
   if (!attachments?.length) {
-    return (
-      <Box sx={{ mt: 1.5 }} onClick={(e) => e.stopPropagation()}>
-        <Button
-          size="small"
-          variant="text"
-          disabled={refreshing}
-          onClick={handleRefresh}
-          startIcon={refreshing ? <CircularProgress size={14} /> : <AttachFileOutlinedIcon />}
-          sx={{ textTransform: "none", px: 0 }}
-        >
-          {refreshing ? "Syncing from Gmail…" : "Sync attachments from Gmail"}
-        </Button>
-        {error ? (
-          <Typography variant="caption" color="error" sx={{ display: "block", mt: 0.5 }}>
-            {error}
-          </Typography>
-        ) : null}
-      </Box>
-    );
+    return null;
   }
 
   const handleDownload = async (att, e) => {
@@ -232,7 +193,7 @@ function MessageAttachments({ messageId, attachments, onRefreshed }) {
   );
 }
 
-function MessageRow({ item, defaultExpanded, onMessageRefreshed }) {
+function MessageRow({ item, defaultExpanded }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [readingLight, setReadingLight] = useState(false);
   const isSent = item.kind === "sent";
@@ -457,11 +418,7 @@ function MessageRow({ item, defaultExpanded, onMessageRefreshed }) {
             readingLight={readingLight}
           />
           {!isSent ? (
-            <MessageAttachments
-              messageId={d.id}
-              attachments={attachments}
-              onRefreshed={onMessageRefreshed}
-            />
+            <MessageAttachments messageId={d.id} attachments={attachments} />
           ) : null}
         </Box>
       </Collapse>
@@ -541,7 +498,7 @@ function EventRow({ data }) {
   );
 }
 
-export default function Thread({ timeline, onMessageRefreshed }) {
+export default function Thread({ timeline }) {
   const items = useMemo(() => normalizeItems(timeline), [timeline]);
   if (!items.length) {
     return (
@@ -576,7 +533,6 @@ export default function Thread({ timeline, onMessageRefreshed }) {
             key={item.id}
             item={item}
             defaultExpanded={i === newestMessageIndex}
-            onMessageRefreshed={onMessageRefreshed}
           />
         )
       )}
